@@ -28,7 +28,7 @@
 | 管控层 | `SbieSvc.exe` + `Sandboxie.ini` + `Templates.ini` | 保留官方签名版，不修改 |
 | 注入层 | `SbieDll.dll`（`LowLevel.dll` 内嵌进服务） | 保留官方签名版，不修改 |
 | 接口层 | `SbieApi_*` / `SbieDll_*` 导出 + 服务消息协议 | 由新 UI 调用，其中受签名保护的部分不可用 |
-| 界面层 | `SbieCtrl.exe` / `SandMan.exe` / Shell 扩展 | 可替换；官方界面若保留运行，可作为唯一合法的签名界面继续存在 |
+| 界面层 | 原有界面组件 | 全部由自研 UI 替换 |
 
 一句话：**运行期依赖 4 个二进制（`SbieDrv.sys`、`SbieSvc.exe`、`SbieDll.dll`、`SbieMsg.dll`）与 2 个配置文件（`Sandboxie.ini`、`Templates.ini`），全部使用官方原版；三大功能中"沙箱管理、文件管控、网络管控"的主体可用，但消息弹窗、活动监控、强制入沙开关等受签名保护的能力永久不可用。新 UI 不需要、也不允许修改任何核心源文件。**
 
@@ -67,7 +67,7 @@
 - 安装目录即 `SbieApi_GetHomePath` 返回的 Home Path，用于定位 ini、日志与工具。
 - `LowLevel.dll` 不单独分发：它被内嵌进 `SbieSvc.exe` 作为注入资源。
 - 只有文件副本而没有已安装并运行的驱动与服务时，任何 UI 都无法工作。
-- 官方安装会为若干组件附带 `.sig` 旁文件（例如 `SbieSvc.exe.sig`、`Start.exe.sig`、`SbieCtrl.exe.sig`），这些文件必须随组件原样保留；替换组件而不替换签名会导致信任校验失败。
+- 官方安装会为若干组件附带 `.sig` 旁文件（例如 `SbieSvc.exe.sig`、`Start.exe.sig`），这些文件必须随组件原样保留；替换组件而不替换签名会导致信任校验失败。
 
 ### 2.2 编译期接口文件
 
@@ -83,13 +83,6 @@
 | `Sandboxie/common/win32_ntddk.h` | NT 结构定义 | 32/64 位混用或自实现协议时 |
 | `Sandboxie/core/svc/msgids.h` 及 `*Wire.h` | 服务消息 ID 与结构 | 只在与 SbieSvc 直接通信时需要（只读参考） |
 | `SandboxiePlus/QSbieAPI/`（LGPL） | 现成的纯用户态客户端实现：自建 IOCTL + ALPC，不依赖 SbieDll | 参考或移植（尤其非 C/C++ 语言） |
-
-### 2.3 明确不需要的文件
-
-- `Sandboxie/apps/control`（SbieCtrl.exe）、`SandboxiePlus/SandMan`（Qt 界面）、`SbieShell`、`MiscHelpers`、`QtSingleApp`、`UGlobalHotkey`：新 UI 运行期不需要（官方界面若保留，可继续承担签名界面的角色）。
-- `Sandboxie/apps/common`：MFC 公共界面库，不用 MFC 即可排除。
-- `SandboxieTools/MiniDump`：崩溃转储工具，非必需。
-- `SandboxieTools/ImBox`、`ImDisk`：只与加密沙箱相关；本项目无证书，该功能永久不可用，但注意 `SbieSvc` 的 MountManager 在编译时已包含 ImBox，删源码目录会导致服务编译失败（本项目不编译服务，故仅作说明）。
 
 ## 3. 需要调用的函数与过程
 
@@ -140,8 +133,8 @@
 |---|---|---|
 | 读取某沙箱的文件规则 | `SbieApi_QueryConf(box, L"OpenFilePath", index, buf, len)` 逐条枚举 | UI 应优先使用的正规途径 |
 | 箱内文件枚举 | 直接遍历 `QueryBoxPath` 得到的 FileRootPath | 目录按盘符组织，官方界面也是这么做的 |
-| 文件恢复 | UI 侧文件复制（建目录、复制、冲突询问） | 官方 SandMan 的 `RecoverFiles` 就是普通文件复制；恢复前可选执行用户配置的安全检查器 |
-| 取得箱内文件的真实宿主路径 | `SbieApi_OpenFile` 加 `SbieApi_GetFileName` | 经典界面的 `QuickRecover.cpp` 用这对接口取真实路径，而不是字符串拼接 |
+| 文件恢复 | UI 侧文件复制（建目录、复制、冲突询问） | 恢复本质是普通文件复制；恢复前可选执行用户配置的安全检查器 |
+| 取得箱内文件的真实宿主路径 | `SbieApi_OpenFile` 加 `SbieApi_GetFileName` | 用这对接口取真实路径，而不是字符串拼接 |
 | 自动恢复与文件迁移的实时通知 | 消息 2199、队列请求 `MAN_FILE_MIGRATION` | **永久不可用**（前者被服务日志跳过，后者属于 leader 独占的交互队列）；文件恢复只能由用户手动触发 |
 | 驱动内部路径表 | `SbieApi_QueryPathList`（参数为 `fo`、`fc` 等两字符代码） | 面向沙箱进程或服务的低层接口，UI 一般不需要 |
 
@@ -178,7 +171,7 @@
 - **服务会主动跳过三类通知**：2199 自动恢复、2198 文件迁移进度、1399 进程启动。因此这三类结构化通知在本项目中永久缺失，文件恢复只能手工触发，也不会有"程序已入沙"的实时事件。
 - 其余用户可见消息（崩溃、启动被阻止等）都会进入该文件。
 
-服务自动拉起界面的约定（`sbieiniserver.cpp` 的 `RunSbieCtrl`）仍然可用：用户设置 `SbieCtrl_AutoStartAgent` 指定程序与参数（缺省回退 `SbieCtrl.exe`），由服务从安装目录启动；`SbieCtrl_EnableAutoStart=n` 可禁止。**注意：被拉起不等于获得消息权限，本项目的 UI 仍只能靠日志文件显示消息。**
+服务自动拉起界面的约定（`sbieiniserver.cpp` 的 `RunSbieCtrl`）仍然可用：用户设置 `SbieCtrl_AutoStartAgent` 指定程序与参数（未设置时由服务使用内置默认值），由服务从安装目录启动；`SbieCtrl_EnableAutoStart=n` 可禁止。**注意：被拉起不等于获得消息权限，本项目的 UI 仍只能靠日志文件显示消息。**
 
 ## 4. 需要修改的文件
 
@@ -205,7 +198,6 @@
 | `Sandboxie/core/dll`、`core/low` | 注入链核心；自编译版本与官方驱动的版本与协议匹配无保证 |
 | `Sandboxie/apps/start`、`apps/ini` | 官方签名组件，替换后相关接口的签名校验可能失败 |
 | `Sandboxie/msgs` | 官方签名资源组件，改动无收益 |
-| `SandboxiePlus/*` 官方界面二进制 | 若保留安装，它是唯一能通过签名校验的会话界面；不要替换成自编译版本 |
 | `Sandboxie/core/drv/api_defs.h`、`core/svc/msgids.h`、`*Wire.h` | 只可作为只读协议参考；扩展协议需要两端同时实现，而两端都是官方二进制，扩展不可实现 |
 
 ### 4.3 想要"服务默认拉起自研 UI"的正确做法
@@ -303,7 +295,28 @@
 
 阶段 7 是消息能力的全部：不要实现依赖 session leader 的弹窗、监控或自动恢复交互。
 
-## 7. 参考源码索引
+## 7. 官方服务器请求排查（仅限本文档列出的组件）
+
+结论：本文档第 2 节列出的组件在运行中都不会自动向官方服务器发送请求。仅有的官方网址接触点分两类，都出现在 `Start.exe` 与 `SbieMsg.dll` 中：一类是"用户点击后由浏览器打开"，另一类是"纯文本"。
+
+| 组件 | 自动请求 | 说明与依据 |
+|---|---|---|
+| `SbieDrv.sys` | 否 | 对 `\Device\Afd` 等路径的处理只是过滤沙箱内程序的网络设备访问（`core/drv/file.c`）；证书校验完全在本地完成：读取安装目录下的 `Certificate.dat`，用内嵌公钥验证哈希与签名（`core/drv/verify.c`），没有网络调用 |
+| `SbieSvc.exe` | 否 | 服务代码中不存在 HTTP/WinHTTP 客户端，职责限于 IPC 与进程管理 |
+| `SbieDll.dll` | 否 | `net.c`、`proxy.c` 中的 SOCKS5 逻辑是替沙箱内程序连接**用户配置的代理地址**（该功能受证书门控，本项目不可用）；`dns_filter.c` 只改写沙箱内程序的 DNS 解析。DLL 自身不连接任何官方地址 |
+| `SbieMsg.dll` | 否 | 纯消息文本资源；部分文案包含官方网址（如升级提示），只是文字，不产生请求 |
+| `Sandboxie.ini`、`Templates.ini` | 否 | 数据文件；`Templates.ini` 中的 `Tmpl.Url=` 是模板元数据（指向第三方厂商主页），仅供界面展示 |
+| `Start.exe` | 否（自身没有 HTTP 代码） | 提醒对话框的按钮通过 `ShellExecute` 打开官方网址（`apps/start/aboutdlg.cpp`），只在用户点击时发生；以 `http://` 或 `https://` 开头的命令行参数会被当作"在沙箱中打开该网址"（`apps/start/start.cpp`） |
+| `SbieIni.exe` | 否 | 纯配置读写工具 |
+
+对自研 UI 的两条约束：
+
+- 不要把消息文本中的网址自动打开，也不要渲染为可点击链接；
+- 启动程序统一使用 `SbieDll_RunSandboxed`（见 3.2 节），不经过 `Start.exe`，即可避免其提醒对话框出现。
+
+以上为源码层结论，未进行网络抓包验证。
+
+## 8. 参考源码索引
 
 | 文件 | 用途 |
 |---|---|
@@ -324,7 +337,9 @@
 | `Sandboxie/core/svc/InteractiveWire.h` | 交互队列请求结构（本项目不可用，只作了解） |
 | `Sandboxie/core/svc/sbieiniserver.cpp` | 配置写入与自动拉起界面逻辑 |
 | `Sandboxie/core/svc/DriverAssistLog.cpp` | 服务日志文件格式与"跳过三类通知"的行为 |
+| `Sandboxie/core/dll/net.c` | 沙箱内程序的网络 Hook 与 SOCKS5 代理转发（不产生官方请求） |
+| `Sandboxie/apps/start/aboutdlg.cpp` | 提醒对话框及打开官方网址的按钮 |
+| `Sandboxie/apps/start/start.cpp` | 命令行参数处理（含以 http/https 参数在沙箱中打开网址） |
 | `SandboxiePlus/QSbieAPI/SbieAPI.cpp` | 官方参考客户端：连接、消息循环、配置读写 |
 | `SandboxiePlus/QSbieAPI/Sandboxie/SandBox.cpp` | 官方参考：沙箱管理与启动流程 |
-| `SandboxiePlus/SandMan/SandManRecovery.cpp` | 官方参考：文件恢复实现 |
 | `UItest/README.md` | 本仓库最小原型已验证的结论与限制 |
