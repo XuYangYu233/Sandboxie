@@ -93,7 +93,7 @@
 | `SbieApi_GetVersion` / `SbieApi_GetVersionEx` | 探测驱动是否存在及版本 | 可用；启动第一步 |
 | `SbieApi_GetHomePath` | 取得安装目录 | 可用 |
 | `SbieApi_SessionLeader(session_id, &pid)` | 查询当前会话的 leader | 可用（查询方向） |
-| `SbieApi_SessionLeader(0, NULL)` | 注册为会话界面 | **永久不可用**，必然返回 `STATUS_INVALID_SIGNATURE`；不要调用或不要依赖其结果 |
+| `SbieApi_SessionLeader(0, NULL)` | 注册为会话界面 | **永久不可用**，必然返回 `STATUS_INVALID_SIGNATURE` |
 | `SbieApi_GetMessage` | 读取驱动消息日志 | **永久不可用**（只有 leader 或服务可读）；改用服务日志文件 |
 | `SbieDll_StartSbieSvc` | 按需启动服务 | 通常不需要（服务随系统启动） |
 
@@ -106,7 +106,7 @@
 | 查询沙箱路径 | `SbieApi_QueryBoxPath(box, file, key, ipc, len...)` | 分别返回文件根、注册表根、IPC 根，是文件管控与恢复的基础 |
 | 读取配置 | `SbieApi_QueryConf` / `QueryConfBool` / `QueryConfNumber` / `QueryConfNumber64` | 默认展开模板；`QueryConfAsIs` 不展开 |
 | 创建沙箱 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE, box, L"Enabled", L"y")` 后 `SbieApi_ReloadConf` | 官方 Plus 的 `CreateBox` 等价于写 `Enabled=y` |
-| 删除沙箱 | `SbieApi_UpdateConf(CONF_REMOVE_SECTION, box, NULL, L"")` | 第 4 个参数必须非 NULL，实现里直接对其调用 `wcslen` |
+| 删除沙箱 | `SbieApi_UpdateConf(CONF_REMOVE_SECTION, box, NULL, L"")` | 删除整个配置节 |
 | 修改、追加、删除设置 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE / CONF_APPEND_VALUE / CONF_REMOVE_VALUE, ...)` | 逐项写入；写完后按需 `SbieApi_ReloadConf` |
 | 复制或重命名沙箱 | 逐项读取配置后写入新 section，再用 `CONF_REMOVE_SECTION` 删除旧 section | QSbieAPI 的 `RenameSection` 是现成算法 |
 | 启动程序入沙 | `SbieDll_RunSandboxed(box, cmd, dir, flags, si, pi)` | 可用；等价于向服务发 `MSGID_PROCESS_RUN_SANDBOXED`；`SbieDll_RunStartExe` 在宿主进程中不可用 |
@@ -153,7 +153,6 @@
 行为特征（重要）：
 
 - 规则在进程创建或配置重载时构建；规则解析失败时驱动选择 fail-closed（宁可断网也不放行，见 `WFP_UpdateProcess`）。
-- 必须用 `SbieApi_QueryConf` 回读校验：键名写错时驱动按默认值处理，而默认是**允许联网**，会出现"界面显示已阻断、实际可以上网"的假安全。
 
 ### 3.5 消息与通知（本项目只有唯一可用通道）
 
@@ -184,10 +183,9 @@
 | 新增的 UI 工程与源码 | 界面主体 | 链接 `SbieDll.lib` 或自实现客户端；核心源文件不动 |
 | 自带命令行工具（如探测程序） | 自检与排障 | 同上 |
 | 打包脚本与安装清单 | 发行 | 必须**原样携带**官方签名二进制及其 `.sig` 文件 |
-| `Sandboxie.ini`（运行时数据） | 用户设置、沙箱配置 | 通过 `SbieApi_UpdateConf` 写入，不直接编辑文件 |
-| `Templates.ini`（安装目录数据文件） | 自定义默认模板 | 驱动只读取，不做签名校验；但写错会影响默认值甚至隔离强度，需谨慎测试 |
+| `Sandboxie.ini`（运行时数据） | 用户设置、沙箱配置 | 通过 `SbieApi_UpdateConf` 写入 |
+| `Templates.ini`（安装目录数据文件） | 自定义默认模板 | 驱动只读取，不做签名校验 |
 | 服务注册表值（如 `LogFile`、`MultiLog`） | 消息日志与分流 | 管理员一次性写入 |
-| 官方界面的配置文件（如 `Sandboxie-Plus.ini`） | 关闭官方弹窗等行为 | 例如 `[UIConfig] DisableMessages=true`，避免与自研 UI 重复弹窗 |
 
 ### 4.2 禁止修改（会破坏信任链或超出项目范围）
 
@@ -212,59 +210,34 @@
 - 受校验的操作包括：`API_SESSION_LEADER`（设置方向）、`API_SET_SERVICE_PORT`、`API_PROCESS_EXEMPTION_CONTROL`、`API_SET_SECURE_PARAM`、`API_FORCE_CHILDREN`、`API_DISABLE_FORCE_PROCESS`（设置方向）。
 - 新 UI 没有 `.sig`，上述操作必然失败（`STATUS_INVALID_SIGNATURE`，即 `0xC000A000`）。因此会话领导权、驱动消息日志、活动监控、交互队列、强制入沙开关等能力在本项目中不存在替代实现路径，只能改用第 3.5 节的服务日志文件，或干脆不做这些功能。
 
-### 5.2 协议与 ABI 漂移
+### 5.2 与核心的接口耦合
 
-- UI 与核心必须同版本，或严格限定使用的函数子集（QSbieAPI 注释明确说明只使用部分函数以兼容多个驱动版本）。
-- 结构约定陷阱：`UNICODE_STRING64`、`API_NUM_ARGS` 为 8 个 64 位参数槽、指针宽度与结构 packing；32 位 UI 与 64 位驱动之间的参数布局不同（`common/win32_ntddk.h` 即为此存在）。
-- 具体案例：`SbieApi_UpdateConf` 内部先对 value 调用 `wcslen`，传 NULL 会在 UI 侧直接崩溃，删除值应传空字符串；`SbieApi_EnumProcessEx` 的 count 必须先填缓冲区容量，填 0 会拿不到任何进程。
+- 自研 UI 使用的 `SbieApi_*`、服务消息与 wire 结构属于核心的内部接口，不是对外承诺的稳定 ABI；核心版本变化可能改变行为或结构，而本项目不修改核心，只能通过锁定核心版本或严格限定使用的函数子集来应对（QSbieAPI 注释即说明它只用部分函数以兼容多个驱动版本）。
+- 接口按 64 位参数槽（`API_NUM_ARGS` 为 8）与 `UNICODE_STRING64` 等结构设计，布局以 `common/win32_ntddk.h`、`core/drv/api_defs.h` 为准；UI 的位数必须与核心匹配（Win32、x64、ARM64、ARM64EC 各自对应）。
 
-### 5.3 配置写入路径
+### 5.3 文件恢复的信任边界
 
-- 必须通过 `SbieApi_UpdateConf` 写入（驱动转交服务端 `SbieIniServer`），不要直接改 `Sandboxie.ini`：服务需要对写操作串行化、加锁、刷新内存缓存并通知驱动重载；绕过它会与缓存和锁竞争，出现"改了不生效或部分生效"。
-- 写入后按需调用 `SbieApi_ReloadConf`，并用 `SbieApi_QueryConf` 回读确认。
-- 便携模式与系统模式路径不同，应使用 `SbieApi_GetHomePath`，不要硬编码 `C:\Windows\Sandboxie.ini`。
+- 恢复或删除文件时，箱内内容属于不可信数据：路径可能包含 junction 或符号链接（重解析点），恢复操作可能被诱导为覆盖宿主任意文件。恢复前应先确认真实路径（`SbieApi_OpenFile` 加 `SbieApi_GetFileName`），并可选执行安全检查器。
 
-### 5.4 沙箱边界被界面削弱的可能
+### 5.4 网络管控的固有约束
 
-- UI 只负责写配置，但 `OpenFilePath`、`AllowNetworkAccess` 这类键直接决定隔离强度；一个写错通配符（如 `*`、设备路径、UNC、带重解析点的路径）就可能把宿主目录开放给沙箱程序。
-- 配置值会经驱动展开环境变量与模板（`conf_expand.c`）；UI 应做输入校验与回读校验，不信任用户输入。
-- 恢复或删除文件时，箱内内容属于不可信数据：路径可能包含 junction 或符号链接（重解析点），恶意程序可以借此把"恢复到宿主"变成"覆盖任意宿主文件"。官方做法是先用 `SbieApi_OpenFile` 加 `SbieApi_GetFileName` 确认真实路径，并可选执行安全检查器，最后才复制；新 UI 若用字符串拼接路径，风险显著上升。
+- 网络规则在进程创建时构建，配置重载时刷新；驱动在规则解析失败时选择 fail-closed（宁可断网也不放行，见 `WFP_UpdateProcess`）。
+- `NetworkDnsFilter`、`NetworkUseProxy` 等由证书门控的设置在无证书环境下**永久不生效**。
 
-### 5.5 网络管控的假安全
-
-- 驱动在规则解析失败时 fail-closed，但**键名写错**属于"没有规则"而非"解析失败"，此时默认策略是放行（`AllowNetworkAccess` 默认 TRUE），界面显示已阻断而实际可联网。
-- 规则在进程创建时构建，配置重载时会刷新；改完配置立即测试同一进程可能仍按旧规则运行，容易误判。
-- `NetworkDnsFilter`、`NetworkUseProxy` 等由证书门控的设置在无证书环境下**永久不生效**，UI 不应提供这些开关，也不要向用户承诺可用。
-
-### 5.6 消息与通知的功能缺口
+### 5.5 消息与通知的功能缺口
 
 - 由于拿不到会话领导权，消息弹窗、活动监控、交互队列全部不可用；唯一替代是服务日志文件，而该文件**不包含** 2199 自动恢复、2198 迁移进度、1399 进程启动三类通知。
 - 直接后果：文件恢复只能手工触发；无法实现"程序入沙时提示/记录"的实时事件；无法响应沙箱程序发起的文件迁移与联网放行请求（这些请求既然无人应答，行为由核心默认处置决定）。
-- 如果官方界面仍在运行，它会继续作为会话界面处理这些请求与弹窗；自研 UI 与它并存时要注意职责边界（自研 UI 只管管理与配置，不要承诺接管消息）。
+- 官方界面若仍在运行，它会继续作为会话界面处理这些请求与弹窗；自研 UI 只负责管理与配置，不接管消息通道。
 
-### 5.7 进程与权限
-
-- UI 应作为普通用户进程运行：它要处理来自沙箱（不可信）的请求；常驻管理员权限会把 UI 变成高价值攻击面。唯一需要提权的是一次性的注册表配置（如 `LogFile`）。
-- 提权失败要可降级：拿不到 UAC 只应影响消息日志通道，不应让主界面不可用。
-
-### 5.8 版本与平台矩阵
-
-- 核心支持 Win32、x64、ARM64、ARM64EC；自研 C++ UI 需要明确与核心匹配的位数组合，Python 加 ctypes 则跟随解释器位数。
-- 内核代码没有自动化测试，任何涉及驱动的改动都只能人工回归（本项目禁止改驱动，因此该风险只需通过"不修改"来规避）。
-
-### 5.9 风险等级汇总
+### 5.6 风险等级汇总
 
 | 风险 | 等级 | 触发条件 | 主要后果 |
 |---|---|---|---|
-| 依赖签名能力（leader、监控、队列） | 高 | 设计时未确认接口是否受保护 | 功能永久不可用，返工 |
-| 手改 Sandboxie.ini | 高 | 绕过 `SbieApi_UpdateConf` | 配置不生效、缓存不一致 |
-| 恢复文件跟随重解析点 | 高 | 直接按字符串路径复制 | 可能覆盖任意宿主文件 |
-| 网络规则键名写错 | 中 | 未回读校验 | 假安全：显示阻断但可联网 |
-| 误用证书门控设置 | 中 | 实现了 `NetworkDnsFilter` 等不可用功能 | 功能不生效，用户困惑 |
-| ABI 与结构不匹配 | 中 | 手写结构或跨版本混用 | 调用失败甚至数据损坏 |
-| 双 UI 并存 | 中 | 未界定职责 | 消息显示混乱或缺失 |
-| 通配符配置过宽 | 中 | `OpenFilePath` 等写入过宽规则 | 隔离强度下降 |
-| 常驻管理员权限 | 中 | UI 以管理员运行 | 攻击面扩大 |
+| 签名保护的能力不可用（leader、监控、队列、消息日志） | 高 | 驱动只信任带有效 `.sig` 的调用方 | 相关功能无法实现，只能改用服务日志文件 |
+| 恢复文件跟随重解析点 | 高 | 沙箱内存在恶意重解析点 | 可能覆盖任意宿主文件 |
+| 证书门控设置不生效 | 中 | 使用 `NetworkDnsFilter`、`NetworkUseProxy` 等设置 | 功能永久不可用 |
+| 双 UI 并存 | 中 | 官方界面与自研 UI 同时运行 | 消息显示混乱或缺失 |
 
 ## 6. 推荐实现与验证清单
 
@@ -293,7 +266,7 @@
 | 6 | 网络管控 | `AllowNetworkAccess=n` 后目标进程不能联网；`QueryConf` 回读与实测一致 |
 | 7 | 消息通道 | 配置 `LogFile` 注册表值；触发崩溃消息，确认文本文件出现新行且 UI 弹窗显示 |
 
-阶段 7 是消息能力的全部：不要实现依赖 session leader 的弹窗、监控或自动恢复交互。
+阶段 7 覆盖了本项目全部可用的消息能力；依赖 session leader 的弹窗、监控与自动恢复交互不可实现。
 
 ## 7. 官方服务器请求排查（仅限本文档列出的组件）
 
