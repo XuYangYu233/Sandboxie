@@ -6,19 +6,47 @@
 >
 > **相关原型**：本仓库 `UItest/`（Python + tkinter + ctypes，已跑通基础链路）。本文档在其实测结论之上，给出完整清单与代码风险分析。
 
+## 0. 项目硬约束（本文档所有结论的前提）
+
+本项目固定运行在以下条件，文档中不再考虑任何其他情形：
+
+| 约束 | 内容 | 直接影响 |
+|---|---|---|
+| C1 | 永远没有官方签发的证书 | 所有由证书门控的功能永久不可用 |
+| C2 | 永远不开启"不要求驱动签名"的模式（不启用测试签名等） | 驱动的信任校验始终生效 |
+| C3 | 永远使用官方签名的核心二进制，不重新编译、不替换、不重新签名核心组件 | 驱动、服务、注入 DLL、工具全部保持原样 |
+
+由 C2 与 C3 可以推出一个覆盖全篇的结论：**新 UI 永远无法通过驱动的调用方签名校验**，因此凡是要求"调用方已签名"的能力，一律视为永久不可用；凡是要求重新编译核心组件的做法，一律不在本项目范围内。后文对每个接口都会标注这一属性。
+
 ## 1. 总体结论
 
-核心可以原样保留，新 UI 既不需要编译进核心工程，也不需要修改内核代码。分层如下：
+核心原样保留，新 UI 只能建立在外围。分层如下：
 
 | 层 | 组件 | 处置 |
 |---|---|---|
-| 内核层 | `SbieDrv.sys` | 保留（官方签名版优先） |
-| 管控层 | `SbieSvc.exe` + `Sandboxie.ini` + `Templates.ini` | 保留 |
-| 注入层 | `SbieDll.dll`（`core/low` 内嵌进服务） | 保留 |
-| 接口层 | `SbieApi_*` / `SbieDll_*` 导出 + 服务消息协议 | 由新 UI 调用 |
-| 界面层 | `SbieCtrl.exe` / `SandMan.exe` / Shell 扩展 | 全部替换 |
+| 内核层 | `SbieDrv.sys` | 保留官方签名版，不修改 |
+| 管控层 | `SbieSvc.exe` + `Sandboxie.ini` + `Templates.ini` | 保留官方签名版，不修改 |
+| 注入层 | `SbieDll.dll`（`LowLevel.dll` 内嵌进服务） | 保留官方签名版，不修改 |
+| 接口层 | `SbieApi_*` / `SbieDll_*` 导出 + 服务消息协议 | 由新 UI 调用，其中受签名保护的部分不可用 |
+| 界面层 | `SbieCtrl.exe` / `SandMan.exe` / Shell 扩展 | 可替换；官方界面若保留运行，可作为唯一合法的签名界面继续存在 |
 
-一句话：**运行期只需加载 4 个二进制（`SbieDrv.sys`、`SbieSvc.exe`、`SbieDll.dll`、`SbieMsg.dll`）和 2 个配置文件（`Sandboxie.ini`、`Templates.ini`）；三大功能通过 `SbieDll.dll` 导出的 `SbieApi_*` / `SbieDll_*` 即可完成；除非要做"接管消息通道"或"自签名驱动"，一个核心源文件都不用改。**
+一句话：**运行期依赖 4 个二进制（`SbieDrv.sys`、`SbieSvc.exe`、`SbieDll.dll`、`SbieMsg.dll`）与 2 个配置文件（`Sandboxie.ini`、`Templates.ini`），全部使用官方原版；三大功能中"沙箱管理、文件管控、网络管控"的主体可用，但消息弹窗、活动监控、强制入沙开关、官方更新通道等受签名保护的能力永久不可用。新 UI 不需要、也不允许修改任何核心源文件。**
+
+### 1.1 永久不可用能力速览
+
+| 能力 | 依赖的检查 | 结论 |
+|---|---|---|
+| 注册为会话界面（session leader） | 驱动 `MyIsCallerSigned`（`core/drv/session.c`） | 永久不可用（`STATUS_INVALID_SIGNATURE`） |
+| 读取驱动消息日志 `SbieApi_GetMessage` | 必须是本会话的 leader（`Api_GetMessage` 内校验） | 永久不可用；改用服务日志文件（见 3.5） |
+| 沙箱活动监控 `API_MONITOR_CONTROL` / `API_MONITOR_GET2` | 依赖 leader 创建的会话块 | 永久不可用（除非官方界面正在运行并为该会话创建了块，不能作为设计依赖） |
+| 交互队列（文件迁移、网络封锁放行应答） | 队列由 leader 创建并独占 | 永久不可用 |
+| 结构化的 2199 自动恢复 / 2198 迁移进度 / 1399 进程启动通知 | 由驱动消息通道投递 | 永久不可用（服务日志文件也会主动跳过这三类） |
+| 禁用强制入沙的开关（`SbieApi_DisableForceProcess` 的设置方向） | 驱动 `MyIsCallerSigned` | 永久不可用（查询方向可用） |
+| 进程豁免控制 `SbieApi_ProcessExemptionControl` | 驱动 `MyIsCallerSigned` | 永久不可用 |
+| 安全参数写入 `API_SET_SECURE_PARAM` | 驱动 `MyIsCallerSigned` | 永久不可用 |
+| 官方更新通道 `MSGID_PROCESS_RUN_UPDATER`（UpdUtil） | 服务端 `PipeServer::IsCallerSigned` | 永久不可用；更新只能由用户运行官方安装包 |
+| 证书门控功能：隐私模式、安全增强、加密沙箱、`NetworkDnsFilter`、`NetworkUseProxy` 等 | 驱动 `Verify_CertInfo` 与设置的 `Requirements=c*` | 永久不可用（写入也会被忽略或导致进程被处置） |
+| 重新编译并替换核心组件 | 各组件的 `.sig` 校验（如服务启动时的 `API_SET_SERVICE_PORT`） | 禁止：自编译产物签名不匹配，会导致服务初始化失败等连锁问题 |
 
 ## 2. 需要加载的文件（不含界面）
 
@@ -26,57 +54,57 @@
 
 | 文件 | 由谁加载 | 作用 | 必需性 |
 |---|---|---|---|
-| `SbieDrv.sys` | 内核服务（SCM 注册，安装/维护工具写入） | 隔离引擎：文件、注册表、网络、进程的过滤与重定向 | 必须 |
-| `SbieSvc.exe` | Windows 服务；也可被 `SbieDll_StartSbieSvc` 按需拉起 | IPC 服务器集合（进程、文件、队列、SbieIni、MountManager 等） | 必须 |
-| `SbieDll.dll` | 由驱动注入沙箱进程；UI 进程链接 `SbieDll.lib` 后也会把它加载为 API 客户端 | 用户态 Hook + `SbieApi_*` / `SbieDll_*` 导出实现 | 必须 |
+| `SbieDrv.sys` | 内核服务（SCM 注册，安装工具写入） | 隔离引擎：文件、注册表、网络、进程过滤与重定向 | 必须（官方签名版） |
+| `SbieSvc.exe` | Windows 服务；也可被 `SbieDll_StartSbieSvc` 按需拉起 | IPC 服务器集合（进程、文件、队列、SbieIni、MountManager 等） | 必须（官方签名版） |
+| `SbieDll.dll` | 由驱动注入沙箱进程；UI 进程链接 `SbieDll.lib` 后也会把它加载为 API 客户端 | 用户态 Hook + `SbieApi_*` / `SbieDll_*` 导出实现 | 必须（官方签名版） |
 | `SbieMsg.dll` | UI 通过 `LoadLibrary` 加载（常量 `SBIEMSG_DLL`） | 状态码到消息文案的映射 | 建议（否则界面只能显示数字状态码） |
 | `Sandboxie.ini` | 驱动与服务共同读写（系统模式在 `\SystemRoot\Sandboxie.ini`，便携模式在安装目录） | 全部配置：沙箱定义、文件规则、网络规则 | 必须 |
 | `Templates.ini` | 由**驱动**启动时从安装目录读取 | 模板展开与默认值来源 | 必须（官方驱动依赖，缺失会导致默认值不完整） |
-| `Start.exe` | 由 UI、快捷方式或脚本调用 | 命令行入沙启动 | 可选（可用服务消息替代） |
-| `SbieIni.exe` | 由 UI 调用 | 配置查询/修改命令行工具 | 可选 |
-| `KmdUtil.exe` / `UpdUtil.exe` | 由安装器或 UI 调用 | 驱动与服务的安装、启停、更新 | 产品化必需，开发期可省 |
+| `Start.exe` | 由 UI、快捷方式或脚本调用 | 命令行入沙启动、`run_sbie_ctrl` 拉起界面 | 可选（官方签名版） |
+| `SbieIni.exe` | 由 UI 调用 | 配置查询修改命令行工具 | 可选（官方签名版） |
+| `KmdUtil.exe` | 由安装器调用 | 驱动与服务的安装、启停 | 安装时使用（官方签名版） |
 
 补充：
 
 - 安装目录即 `SbieApi_GetHomePath` 返回的 Home Path，用于定位 ini、日志与工具。
 - `LowLevel.dll` 不单独分发：它被内嵌进 `SbieSvc.exe` 作为注入资源。
-- 只有文件副本而没有已安装并运行的驱动与服务时，任何 UI 都无法工作（`UItest/README.md` 中对此有明确说明）。
+- 只有文件副本而没有已安装并运行的驱动与服务时，任何 UI 都无法工作。
+- 官方安装会为若干组件附带 `.sig` 旁文件（例如 `SbieSvc.exe.sig`、`Start.exe.sig`、`SbieCtrl.exe.sig`），这些文件必须随组件原样保留；替换组件而不替换签名会导致信任校验失败。
 
 ### 2.2 编译期接口文件
 
 | 文件 | 内容 | 何时需要 |
 |---|---|---|
 | `Sandboxie/core/dll/sbieapi.h` | `SbieApi_*` 全部导出声明 | 始终（主接口） |
-| `Sandboxie/core/dll/sbiedll.h` | `SbieDll_*` 导出（含 `SbieDll_FormatMessage*`、`SbieDll_CallServer`、`SbieDll_RunSandboxed`、`SbieDll_KillOne`） | 消息格式化、启动/结束进程时 |
+| `Sandboxie/core/dll/sbiedll.h` | `SbieDll_*` 导出（含 `SbieDll_FormatMessage*`、`SbieDll_RunSandboxed`、`SbieDll_KillOne`） | 消息格式化、启动与结束进程时 |
 | `Sandboxie/core/dll/SboxDll.def`、`SboxDll64.def` | 导出与序号定义 | 链接 `SbieDll.lib` 时由链接器使用 |
-| `Sandboxie/core/drv/api_defs.h` | API 函数码枚举与参数结构（`API_*_ARGS`） | 走 `SbieApi_Ioctl` / `SbieApi_Call`，或自实现客户端时 |
-| `Sandboxie/core/drv/api_flags.h` | `CONF_GET_*` 查询标志与掩码 | 精细控制配置读取时 |
-| `Sandboxie/common/defines.h` | `BOXNAME_COUNT`、`CONF_*` 操作码、各类长度上限 | 写配置与分配缓冲区 |
-| `Sandboxie/common/my_version.h` | 文件名常量（SbieSvc.exe、Start.exe、SbieMsg.dll、SbieIni.exe、SbieCtrl.exe） | 路径解析 |
+| `Sandboxie/core/drv/api_defs.h` | API 函数码枚举与参数结构 | 走 `SbieApi_Ioctl` / `SbieApi_Call`，或自实现客户端时（只读参考） |
+| `Sandboxie/core/drv/api_flags.h` | `CONF_GET_*` 查询标志与掩码 | 精细控制配置读取时（只读参考） |
+| `Sandboxie/common/defines.h` | `BOXNAME_COUNT`、`CONF_*` 操作码、长度上限 | 写配置与分配缓冲区 |
+| `Sandboxie/common/my_version.h` | 文件名常量（SbieSvc.exe、Start.exe、SbieMsg.dll、SbieIni.exe） | 路径解析 |
 | `Sandboxie/common/win32_ntddk.h` | NT 结构定义 | 32/64 位混用或自实现协议时 |
-| `Sandboxie/core/svc/msgids.h` 及 `*Wire.h` | 服务消息 ID 与结构（Process、File、Queue、Interactive、SbieIni、Gui、MountManager） | 只在与 SbieSvc 直接通信时需要 |
+| `Sandboxie/core/svc/msgids.h` 及 `*Wire.h` | 服务消息 ID 与结构 | 只在与 SbieSvc 直接通信时需要（只读参考） |
 | `SandboxiePlus/QSbieAPI/`（LGPL） | 现成的纯用户态客户端实现：自建 IOCTL + ALPC，不依赖 SbieDll | 参考或移植（尤其非 C/C++ 语言） |
 
 ### 2.3 明确不需要的文件
 
-- `Sandboxie/apps/control`（SbieCtrl.exe）、`SandboxiePlus/SandMan`（Qt 界面）、`SbieShell`、`MiscHelpers`、`QtSingleApp`、`UGlobalHotkey`：运行期完全不需要。
+- `Sandboxie/apps/control`（SbieCtrl.exe）、`SandboxiePlus/SandMan`（Qt 界面）、`SbieShell`、`MiscHelpers`、`QtSingleApp`、`UGlobalHotkey`：新 UI 运行期不需要（官方界面若保留，可继续承担签名界面的角色）。
 - `Sandboxie/apps/common`：MFC 公共界面库，不用 MFC 即可排除。
 - `SandboxieTools/MiniDump`：崩溃转储工具，非必需。
-- `SandboxieTools/ImBox`、`ImDisk`：只与加密沙箱相关；但注意 `SbieSvc` 的 MountManager 在编译时已包含 ImBox，删源码目录会导致服务编译失败。
-- 已安装的 SandMan/SbieCtrl 可以不卸载，但要注意"双 UI 争夺 session leader"，见 5.6 节。
+- `SandboxieTools/ImBox`、`ImDisk`：只与加密沙箱相关；本项目无证书，该功能永久不可用，但注意 `SbieSvc` 的 MountManager 在编译时已包含 ImBox，删源码目录会导致服务编译失败（本项目不编译服务，故仅作说明）。
 
 ## 3. 需要调用的函数与过程
 
 ### 3.1 连接与生命周期
 
-| 调用 | 作用 | 备注 |
+| 调用 | 作用 | 本项目可用性 |
 |---|---|---|
-| `SbieApi_GetVersion` / `SbieApi_GetVersionEx` | 探测驱动是否存在及版本 | 启动第一步；失败即"驱动未安装或版本不兼容" |
-| `SbieApi_GetHomePath` | 取得安装目录 | 定位 ini、日志与配套工具 |
-| `SbieApi_SessionLeader(0, NULL)` | 注册为"本会话的界面"（session leader） | 需要驱动信任该可执行文件；失败只影响消息通道，不影响基础功能 |
-| `SbieApi_SessionLeader(session_id, &pid)` | 查询当前会话的 leader | 判断"是否已有其它界面在运行" |
-| `SbieDll_StartSbieSvc` | 按需启动服务 | 服务通常随系统启动，一般无需调用 |
-| `SbieApi_GetMessage` | 读取驱动消息日志 | 仅服务或 session leader 可读；其它进程得到 `STATUS_ACCESS_DENIED` |
+| `SbieApi_GetVersion` / `SbieApi_GetVersionEx` | 探测驱动是否存在及版本 | 可用；启动第一步 |
+| `SbieApi_GetHomePath` | 取得安装目录 | 可用 |
+| `SbieApi_SessionLeader(session_id, &pid)` | 查询当前会话的 leader | 可用（查询方向） |
+| `SbieApi_SessionLeader(0, NULL)` | 注册为会话界面 | **永久不可用**，必然返回 `STATUS_INVALID_SIGNATURE`；不要调用或不要依赖其结果 |
+| `SbieApi_GetMessage` | 读取驱动消息日志 | **永久不可用**（只有 leader 或服务可读）；改用服务日志文件 |
+| `SbieDll_StartSbieSvc` | 按需启动服务 | 通常不需要（服务随系统启动） |
 
 ### 3.2 沙箱管理
 
@@ -86,15 +114,16 @@
 | 沙箱是否启用 | `SbieApi_IsBoxEnabled(box)` | 对应 `Enabled=y` 及 `Enabled=y,user1,...` 形式 |
 | 查询沙箱路径 | `SbieApi_QueryBoxPath(box, file, key, ipc, len...)` | 分别返回文件根、注册表根、IPC 根，是文件管控与恢复的基础 |
 | 读取配置 | `SbieApi_QueryConf` / `QueryConfBool` / `QueryConfNumber` / `QueryConfNumber64` | 默认展开模板；`QueryConfAsIs` 不展开 |
-| 创建沙箱 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE, box, L"Enabled", L"y")` 后 `SbieApi_ReloadConf` | 官方 Plus 的 `CreateBox` 等价于写 `Enabled=y`（见 QSbieAPI 的 `CSbieAPI::CreateBox`） |
+| 创建沙箱 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE, box, L"Enabled", L"y")` 后 `SbieApi_ReloadConf` | 官方 Plus 的 `CreateBox` 等价于写 `Enabled=y` |
 | 删除沙箱 | `SbieApi_UpdateConf(CONF_REMOVE_SECTION, box, NULL, L"")` | 第 4 个参数必须非 NULL，实现里直接对其调用 `wcslen` |
-| 修改/追加/删除设置 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE / CONF_APPEND_VALUE / CONF_REMOVE_VALUE, ...)` | 逐项写入；写完后按需 `SbieApi_ReloadConf` |
+| 修改、追加、删除设置 | `SbieApi_UpdateConf(CONF_UPDATE_VALUE / CONF_APPEND_VALUE / CONF_REMOVE_VALUE, ...)` | 逐项写入；写完后按需 `SbieApi_ReloadConf` |
 | 复制或重命名沙箱 | 逐项读取配置后写入新 section，再用 `CONF_REMOVE_SECTION` 删除旧 section | QSbieAPI 的 `RenameSection` 是现成算法 |
-| 启动程序入沙 | `SbieDll_RunSandboxed(box, cmd, dir, flags, si, pi)` | 宿主进程可用，等价于向服务发 `MSGID_PROCESS_RUN_SANDBOXED`；`SbieDll_RunStartExe` 在宿主进程中不可用（依赖只有沙箱进程内才初始化的状态） |
+| 启动程序入沙 | `SbieDll_RunSandboxed(box, cmd, dir, flags, si, pi)` | 可用；等价于向服务发 `MSGID_PROCESS_RUN_SANDBOXED`；`SbieDll_RunStartExe` 在宿主进程中不可用 |
 | 进程枚举 | `SbieApi_EnumProcessEx(box, all_sessions, session, pids, count)` | count 是入参容量加出参数量，必须先填好缓冲区大小 |
 | 进程详情 | `SbieApi_QueryProcessEx2` / `SbieApi_QueryProcessInfoEx` | 映像路径、PID、会话、所属沙箱 |
-| 终止进程 | `SbieDll_KillOne(pid)` / `SbieDll_KillAll(session, box)` | 也可通过服务消息 `MSGID_PROCESS_KILL_ALL` |
-| 进程豁免控制 | `SbieApi_ProcessExemptionControl` | 需要驱动签名校验通过（见 5.1 节） |
+| 终止进程 | `SbieDll_KillOne(pid)` / `SbieDll_KillAll(session, box)` | 可用；也可通过服务消息 `MSGID_PROCESS_KILL_ALL` |
+| 禁用强制入沙开关 | `SbieApi_DisableForceProcess` | 查询方向可用；**设置方向永久不可用**（需要签名） |
+| 进程豁免控制 | `SbieApi_ProcessExemptionControl` | **永久不可用**（整个接口需要签名校验） |
 
 ### 3.3 文件管控
 
@@ -115,8 +144,7 @@
 | 箱内文件枚举 | 直接遍历 `QueryBoxPath` 得到的 FileRootPath | 目录按盘符组织，官方界面也是这么做的 |
 | 文件恢复 | UI 侧文件复制（建目录、复制、冲突询问） | 官方 SandMan 的 `RecoverFiles` 就是普通文件复制；恢复前可选执行用户配置的安全检查器 |
 | 取得箱内文件的真实宿主路径 | `SbieApi_OpenFile` 加 `SbieApi_GetFileName` | 经典界面的 `QuickRecover.cpp` 用这对接口取真实路径，而不是字符串拼接 |
-| 自动恢复通知 | 驱动消息 2199 | 沙箱程序请求"另存到宿主"时触发，QSbieAPI 中对应 `FileToRecover` |
-| 交互式文件迁移 | 服务队列请求 `MAN_FILE_MIGRATION` | 必须应答 `MSGID_QUEUE_PUTRPL`，否则发起方等待 |
+| 自动恢复与文件迁移的实时通知 | 消息 2199、队列请求 `MAN_FILE_MIGRATION` | **永久不可用**（前者被服务日志跳过，后者属于 leader 独占的交互队列）；文件恢复只能由用户手动触发 |
 | 驱动内部路径表 | `SbieApi_QueryPathList`（参数为 `fo`、`fc` 等两字符代码） | 面向沙箱进程或服务的低层接口，UI 一般不需要 |
 
 ### 3.4 网络管控
@@ -127,66 +155,85 @@
 | `NetworkAccess=[process,]Allow 或 Block;Port=...;Address=...;Protocol=Any 或 TCP 或 UDP` | 逐条出站规则，含端口、地址、协议 | `wfp.c` 的 `WFP_LoadRules` 读取，`common/netfw.c` 解析 |
 | `BlockLocalLoop` | 是否阻断本地回环 | `wfp.c` 中与 `NetworkAccess` 同处读取 |
 | `NetFwTrace` | 流量跟踪，用于调试 | 通过 `Process_GetTraceFlag` 读取 |
-| `NetworkDnsFilter` | DNS 阻断或重定向 | `SbieSettings.ini` 标注 `Requirements=ce`，无证书时驱动层不生效 |
-| `NetworkUseProxy` | 强制代理 | `Requirements=ce3` |
 | `SbieApi_QueryDrvInfo` | 读取 `SBIE_FEATURE_FLAG_WFP`，判断驱动是否带 WFP | QSbieAPI 的 `GetFeatureStr` 示例 |
 | `SbieApi_CheckInternetAccess` | 检查 Internet 设备访问是否被阻断 | 经典界面用它做"网络已阻断"提示 |
+| `NetworkDnsFilter` / `NetworkUseProxy` | DNS 过滤与强制代理 | **永久不可用**：设置带 `Requirements=ce*`，由驱动端证书检查门控，本项目没有证书，写入也不会生效 |
 
 行为特征（重要）：
 
 - 规则在进程创建或配置重载时构建；规则解析失败时驱动选择 fail-closed（宁可断网也不放行，见 `WFP_UpdateProcess`）。
 - 必须用 `SbieApi_QueryConf` 回读校验：键名写错时驱动按默认值处理，而默认是**允许联网**，会出现"界面显示已阻断、实际可以上网"的假安全。
 
-### 3.5 事件与消息（后台循环，新 UI 必做）
+### 3.5 消息与通知（本项目只有唯一可用通道）
 
-官方 Plus 的做法是一个后台线程（`QSbieAPI::run`）循环读取三类来源，新 UI 可以直接照抄这个结构：
+| 通道 | 依赖 | 本项目结论 |
+|---|---|---|
+| 驱动消息日志 `SbieApi_GetMessage` | 调用方必须是 session leader | 永久不可用 |
+| 交互队列 `MSGID_QUEUE_CREATE` / `GETREQ` / `PUTRPL` | 队列由 leader 创建并独占 | 永久不可用 |
+| 沙箱活动监控 `API_MONITOR_CONTROL` / `API_MONITOR_GET2` | 需要 leader 创建的会话块 | 永久不可用 |
+| **服务日志文件（LogFile）** | 服务注册表值 `LogFile` + 读取该文本文件 | **唯一可用通道**，但有限制，见下 |
 
-| 来源 | 调用 | 内容 | 是否可省 |
-|---|---|---|---|
-| 驱动消息日志 | `SbieApi_GetMessage` | SBIE 消息，例如崩溃、自动恢复、进程启动通知 | 可用服务日志文件兜底（见下） |
-| 监控事件 | `SbieApi_MonitorControl` 打开，`SbieApi_MonitorGetEx` 读取 | 文件、注册表、网络活动，用于"沙箱活动"视图 | 可省，但界面会缺少活动视图 |
-| 交互队列 | `MSGID_QUEUE_CREATE` 建队列，`MSGID_QUEUE_GETREQ` 取请求，`MSGID_QUEUE_PUTRPL` 回应答 | 沙箱进程发起的文件迁移、网络封锁放行等需要 UI 决策的请求 | 若支持这两类交互则不可省 |
-| 消息文案 | `SbieDll_FormatMessage`（内部加载 SbieMsg.dll） | 状态码转文本 | 建议保留 |
+服务日志文件（`DriverAssistLog.cpp`）的性质与限制：
 
-无法成为 session leader 时的替代方案（`UItest` 已验证）：给服务设置注册表值 `LogFile`（位于 `HKLM\SYSTEM\CurrentControlSet\Services\SbieSvc`），服务会把 SBIE 消息写成文本文件，UI 直接读取该文件即可展示消息，**不需要任何签名**，代价是以管理员身份配置一次。
+- 注册表值位于 `HKLM\SYSTEM\CurrentControlSet\Services\SbieSvc`，格式为 `版本;文件路径`（如 `2;C:\Windows\System32\LogFiles\Sandboxie.log`），版本 2 附带时间戳、版本 3 附带用户名；需要管理员一次性配置。
+- 文件为 UTF-16，内容为格式化后的消息文本（含 `SBIExxxx` 编号），UI 直接读取即可展示，不需要任何签名。
+- **服务会主动跳过三类通知**：2199 自动恢复、2198 文件迁移进度、1399 进程启动。因此这三类结构化通知在本项目中永久缺失，文件恢复只能手工触发，也不会有"程序已入沙"的实时事件。
+- 其余用户可见消息（崩溃、启动被阻止等）都会进入该文件。
 
-### 3.6 服务自动拉起界面的约定
+服务自动拉起界面的约定（`sbieiniserver.cpp` 的 `RunSbieCtrl`）仍然可用：用户设置 `SbieCtrl_AutoStartAgent` 指定程序与参数（缺省回退 `SbieCtrl.exe`），由服务从安装目录启动；`SbieCtrl_EnableAutoStart=n` 可禁止。**注意：被拉起不等于获得消息权限，本项目的 UI 仍只能靠日志文件显示消息。**
 
-`sbieiniserver.cpp` 中的 `RunSbieCtrl` 表明：服务需要提示用户时，会用 `SbieDll_RunFromHome` 从安装目录启动"agent"：
+### 3.6 更新与维护
 
-- 用户设置 `SbieCtrl_AutoStartAgent` 指定程序与参数，缺省回退到 `SBIECTRL_EXE`（`my_version.h` 中为 `SbieCtrl.exe`）。
-- `SbieCtrl_EnableAutoStart=n` 可以禁止自动启动。
-- 已有 leader 时直接返回"已加载"，不会重复启动。
+| 功能 | 依赖 | 结论 |
+|---|---|---|
+| 官方更新通道 `MSGID_PROCESS_RUN_UPDATER` | 服务端 `PipeServer::IsCallerSigned` | 永久不可用；UI 不应实现"一键更新/安装驱动" |
+| 官方安装包（Inno Setup / NSIS） | 用户手工运行 | 更新与修复都由用户运行官方安装包完成 |
+| 服务日志文件配置 | 管理员写入注册表值 | 一次性配置，可由安装脚本或手动完成 |
 
 ## 4. 需要修改的文件
 
-| 文件 | 何时必须改 | 说明与连带影响 |
-|---|---|---|
-| 新增的 UI 工程与源码 | 总是 | 链接 `SbieDll.lib` 或自实现客户端，核心源码不动 |
-| `Sandboxie/common/my_version.h` | 想让服务默认拉起你的可执行文件，且不想依赖 ini 配置 | 改 `SBIECTRL_EXE`；安装器需同步改名，否则回退路径失效 |
-| `Sandboxie/core/svc/sbieiniserver.cpp` | 想改变自动拉起或接管逻辑 | 服务端改动影响所有会话，改后需重建并签名 `SbieSvc.exe` |
-| `Sandboxie/core/drv/verify.c`（`KphpTrustedPublicKey`） | UI 必须成为 session leader 且拿不到官方签名 | 必须同时重建并签名驱动；所有被校验组件（含 `SbieSvc.exe`，因 `Api_SetServicePort` 也校验）都要用你的私钥重签，否则服务注册失败会导致沙箱整体不可用 |
-| `Sandboxie/core/drv/util.c`（`MyIsCallerSigned`） | 想在自编译驱动上放宽校验 | 会削弱防篡改信任链，强烈不建议 |
-| `Sandboxie/core/drv/api_defs.h` | 仅当要新增 API 函数 | `API_*` 是顺序枚举（隐式加一），在中间插入或删除会改变后续所有函数码并破坏 ABI；只能在 `API_LAST` 前追加，且全部组件需整体升级 |
-| `Sandboxie/core/svc/msgids.h` 与各 `*Wire.h` | 仅当要扩展服务协议 | 同上，会破坏与官方组件的互通 |
-| `Sandboxie/install/Templates.ini`、`SbieSettings.ini` | 需要新的默认模板或设置元数据 | 只影响默认值与编辑器提示 |
-| `Sandboxie/install/*.nsi`、`Installer/*.iss` | 打包发行 | 不属于运行期加载，但决定最终文件清单 |
-| （可选）`Sandboxie/apps/start`、`apps/ini` | 若要改造这两个命令行工具 | 一般保持原样 |
+在硬约束下，修改面被压缩到"核心之外"。原则：**凡是要重新编译核心组件的改动，一律不做；凡是会让官方二进制失去 `.sig` 的替换，一律不做。**
 
-不建议修改：`core/drv` 的隔离逻辑（`file.c`、`key.c`、`wfp.c`、`process*.c` 等）、`core/dll` 的 Hook 清单、既有 API 码顺序。理由见第 5 节。
+### 4.1 可以修改（不触碰签名）
+
+| 文件 | 用途 | 说明 |
+|---|---|---|
+| 新增的 UI 工程与源码 | 界面主体 | 链接 `SbieDll.lib` 或自实现客户端；核心源文件不动 |
+| 自带命令行工具（如探测程序） | 自检与排障 | 同上 |
+| 打包脚本与安装清单 | 发行 | 必须**原样携带**官方签名二进制及其 `.sig` 文件 |
+| `Sandboxie.ini`（运行时数据） | 用户设置、沙箱配置 | 通过 `SbieApi_UpdateConf` 写入，不直接编辑文件 |
+| `Templates.ini`（安装目录数据文件） | 自定义默认模板 | 驱动只读取，不做签名校验；但写错会影响默认值甚至隔离强度，需谨慎测试 |
+| 服务注册表值（如 `LogFile`、`MultiLog`） | 消息日志与分流 | 管理员一次性写入 |
+| 官方界面的配置文件（如 `Sandboxie-Plus.ini`） | 关闭官方弹窗等行为 | 例如 `[UIConfig] DisableMessages=true`，避免与自研 UI 重复弹窗 |
+
+### 4.2 禁止修改（会破坏信任链或超出项目范围）
+
+| 对象 | 为什么禁止 |
+|---|---|
+| `Sandboxie/core/drv` 全部（含 `verify.c`、`util.c`） | 重编译的驱动没有官方签名，在本项目（不启用测试签名）条件下无法加载；改动隔离逻辑还会引入 BSOD 与逃逸风险 |
+| `Sandboxie/core/svc`（含 `sbieiniserver.cpp`、`ProcessServer.cpp` 等） | 自编译 `SbieSvc.exe` 无法匹配 `SbieSvc.exe.sig`，服务启动时的 `API_SET_SERVICE_PORT` 校验会失败，导致服务的核心通信通道注册不上 |
+| `Sandboxie/core/dll`、`core/low` | 注入链核心；自编译版本与官方驱动的版本与协议匹配无保证 |
+| `Sandboxie/apps/start`、`apps/ini` | 官方签名组件，替换后相关接口的签名校验可能失败 |
+| `Sandboxie/msgs` | 官方签名资源组件，改动无收益 |
+| `SandboxiePlus/*` 官方界面二进制 | 若保留安装，它是唯一能通过签名校验的会话界面；不要替换成自编译版本 |
+| `Sandboxie/core/drv/api_defs.h`、`core/svc/msgids.h`、`*Wire.h` | 只可作为只读协议参考；扩展协议需要两端同时实现，而两端都是官方二进制，扩展不可实现 |
+
+### 4.3 想要"服务默认拉起自研 UI"的正确做法
+
+不需要改代码：把用户设置 `SbieCtrl_AutoStartAgent` 指向自研程序（可带参数）即可由服务拉起。但它不会获得任何签名能力，消息仍需从服务日志文件读取。
 
 ## 5. 代码层面的风险
 
-### 5.1 签名与信任链（最高优先级）
+### 5.1 签名信任链带来的永久能力缺失（本项目的核心约束）
 
-- 驱动内嵌 ECDSA-P256 公钥（`core/drv/verify.c`），通过可执行文件旁的 `.sig` 文件校验调用进程（`KphVerifyFile` 与 `MyIsCallerSigned`）。
-- 受校验的操作包括 `API_SESSION_LEADER`、`API_SET_SERVICE_PORT`、`API_PROCESS_EXEMPTION_CONTROL`、`API_SET_SECURE_PARAM`、`API_GET_SECURE_PARAM`、`API_FORCE_CHILDREN` 等。
-- 后果：未签名的自研 UI 调用 `SbieApi_SessionLeader(0, NULL)` 会得到 `STATUS_INVALID_SIGNATURE`（0xC000A000），无法接管消息通道；基础列举、启动、结束进程与配置功能不受影响（UItest 已实测）。
-- 缓解手段：开发期执行 `bcdedit / set testsigning on` 后重启（驱动跳过校验，但整机生效）；或者替换公钥并对全部组件重签（工程量大，且需自行解决驱动签名）。
+- 驱动内嵌 ECDSA-P256 公钥，用可执行文件旁边的 `.sig` 校验调用进程（`core/drv/verify.c` 的 `KphVerifyCurrentProcess` 与 `core/drv/util.c` 的 `MyIsCallerSigned`）。
+- 受校验的操作包括：`API_SESSION_LEADER`（设置方向）、`API_SET_SERVICE_PORT`、`API_PROCESS_EXEMPTION_CONTROL`、`API_SET_SECURE_PARAM`、`API_FORCE_CHILDREN`、`API_DISABLE_FORCE_PROCESS`（设置方向）。
+- 新 UI 没有 `.sig`，上述操作必然失败（`STATUS_INVALID_SIGNATURE`，即 `0xC000A000`）。因此会话领导权、驱动消息日志、活动监控、交互队列、强制入沙开关等能力在本项目中不存在替代实现路径，只能改用第 3.5 节的服务日志文件，或干脆不做这些功能。
+- 服务侧的更新通道同样校验调用方（`PipeServer::IsCallerSigned` 用于 `RunUpdaterHandler`），未签名 UI 无法触发 `UpdUtil`，因此**不要实现应用内自动更新**。
 
 ### 5.2 协议与 ABI 漂移
 
-- UI 与核心应保持同版本，或严格限定使用的函数子集（QSbieAPI 注释明确说明只使用部分函数以兼容多个驱动版本）。
+- UI 与核心必须同版本，或严格限定使用的函数子集（QSbieAPI 注释明确说明只使用部分函数以兼容多个驱动版本）。
 - 结构约定陷阱：`UNICODE_STRING64`、`API_NUM_ARGS` 为 8 个 64 位参数槽、指针宽度与结构 packing；32 位 UI 与 64 位驱动之间的参数布局不同（`common/win32_ntddk.h` 即为此存在）。
 - 具体案例：`SbieApi_UpdateConf` 内部先对 value 调用 `wcslen`，传 NULL 会在 UI 侧直接崩溃，删除值应传空字符串；`SbieApi_EnumProcessEx` 的 count 必须先填缓冲区容量，填 0 会拿不到任何进程。
 
@@ -206,37 +253,35 @@
 
 - 驱动在规则解析失败时 fail-closed，但**键名写错**属于"没有规则"而非"解析失败"，此时默认策略是放行（`AllowNetworkAccess` 默认 TRUE），界面显示已阻断而实际可联网。
 - 规则在进程创建时构建，配置重载时会刷新；改完配置立即测试同一进程可能仍按旧规则运行，容易误判。
-- `NetworkDnsFilter`、`NetworkUseProxy` 等带 `Requirements=ce*` 的设置，无证书时在驱动层不生效，UI 不应把它们当作基础能力。
+- `NetworkDnsFilter`、`NetworkUseProxy` 等由证书门控的设置在无证书环境下**永久不生效**，UI 不应提供这些开关，也不要向用户承诺可用。
 
-### 5.6 队列与消息处理
+### 5.6 消息与通知的功能缺口
 
-- 队列请求必须应答：`MAN_FILE_MIGRATION`、`MAN_INET_BLOCKADE` 若不调用 `MSGID_QUEUE_PUTRPL`，发起方会一直等待（表现为沙箱内程序卡住）。
-- 队列创建时把事件句柄交给服务（跨进程句柄语义），实现不当会造成句柄泄漏或事件失效。
-- 消息读取有身份门槛（服务或 session leader），队列名按会话区分（`*MANPROXY_` 加会话号）；多会话机器需要按会话建立实例。
-- 双 UI 并存：第二个调用 `SbieApi_SessionLeader` 的进程会得到 `STATUS_DEVICE_ALREADY_ATTACHED`（0xC0000038）。官方 SandMan 有明确的提示与接管流程，新 UI 应实现等价逻辑，否则消息显示会混乱。
+- 由于拿不到会话领导权，消息弹窗、活动监控、交互队列全部不可用；唯一替代是服务日志文件，而该文件**不包含** 2199 自动恢复、2198 迁移进度、1399 进程启动三类通知。
+- 直接后果：文件恢复只能手工触发；无法实现"程序入沙时提示/记录"的实时事件；无法响应沙箱程序发起的文件迁移与联网放行请求（这些请求既然无人应答，行为由核心默认处置决定）。
+- 如果官方界面仍在运行，它会继续作为会话界面处理这些请求与弹窗；自研 UI 与它并存时要注意职责边界（自研 UI 只管管理与配置，不要承诺接管消息）。
 
 ### 5.7 进程与权限
 
-- UI 应作为普通用户进程运行：它要处理来自沙箱（不可信）的请求；若为了写配置或装服务而常驻管理员权限，会把 UI 变成高价值攻击面。安装与提权动作应交给一次性辅助进程（官方 KmdUtil 与 UpdUtil 模式）。
-- 提权失败要可降级：拿不到 UAC 只应影响消息通道或服务安装，不应让主界面不可用（UItest 的 best-effort 设计即为此）。
+- UI 应作为普通用户进程运行：它要处理来自沙箱（不可信）的请求；若为了写配置或装服务而常驻管理员权限，会把 UI 变成高价值攻击面。唯一需要提权的是一次性的注册表配置（如 `LogFile`）与安装动作。
+- 提权失败要可降级：拿不到 UAC 只应影响消息日志通道，不应让主界面不可用。
 
 ### 5.8 版本与平台矩阵
 
-- 核心支持 Win32、x64、ARM64、ARM64EC；自研 C++ UI 需要明确与核心匹配的位数组合，Python 加 ctypes 则天然跟随解释器位数。
-- 内核代码没有自动化测试，驱动侧改动的回归只能人工验证（启动与停止沙箱、进程创建、文件恢复），代价与风险都高。
+- 核心支持 Win32、x64、ARM64、ARM64EC；自研 C++ UI 需要明确与核心匹配的位数组合，Python 加 ctypes 则跟随解释器位数。
+- 内核代码没有自动化测试，任何涉及驱动的改动都只能人工回归（本项目禁止改驱动，因此该风险只需通过"不修改"来规避）。
 
 ### 5.9 风险等级汇总
 
 | 风险 | 等级 | 触发条件 | 主要后果 |
 |---|---|---|---|
-| 签名校验失败 | 高 | 自研 UI 未签名且未开启测试签名 | 无法接管消息通道，弹窗缺失 |
-| 替换驱动公钥 | 高 | 改 `verify.c` 并重建 | 全部组件需重签，服务注册失败即整体不可用 |
+| 依赖签名能力（leader、监控、队列、更新） | 高 | 设计时未确认接口是否受保护 | 功能永久不可用，返工 |
 | 手改 Sandboxie.ini | 高 | 绕过 `SbieApi_UpdateConf` | 配置不生效、缓存不一致 |
 | 恢复文件跟随重解析点 | 高 | 直接按字符串路径复制 | 可能覆盖任意宿主文件 |
 | 网络规则键名写错 | 中 | 未回读校验 | 假安全：显示阻断但可联网 |
-| 队列请求未应答 | 中 | 未实现 `MSGID_QUEUE_PUTRPL` | 沙箱内程序卡住 |
+| 误用证书门控设置 | 中 | 实现了 `NetworkDnsFilter` 等不可用功能 | 功能不生效，用户困惑 |
 | ABI 与结构不匹配 | 中 | 手写结构或跨版本混用 | 调用失败甚至数据损坏 |
-| 双 UI 并存 | 中 | 未处理 leader 冲突 | 消息分裂显示，用户体验混乱 |
+| 双 UI 并存 | 中 | 未界定职责 | 消息显示混乱或缺失 |
 | 通配符配置过宽 | 中 | `OpenFilePath` 等写入过宽规则 | 隔离强度下降 |
 | 常驻管理员权限 | 中 | UI 以管理员运行 | 攻击面扩大 |
 
@@ -244,13 +289,13 @@
 
 ```text
 +--------------------------- 新 UI（普通用户进程） ---------------------------+
-| 沙箱列表  进程列表  文件视图  网络策略编辑  消息弹窗  设置                  |
+| 沙箱列表  进程列表  文件视图  网络策略编辑  设置  日志文件消息窗            |
 |                     SbieBridge（薄封装层）                                  |
 +-----------------------------------+-----------------------------------------+
-        SbieApi_* / SbieDll_* 导出（推荐）        或  自实现 IOCTL + ALPC 客户端
+        SbieApi_* / SbieDll_* 导出（推荐可用集合）   只读参考 IOCTL/ALPC 协议
 +-----------------------------------v-----------------------------------------+
-| SbieSvc.exe（必须运行）  <-ALPC->  SbieDrv.sys（必须加载）                   |
-|  进程/文件/队列/SbieIni 服务器       隔离引擎、重定向、WFP 网络过滤          |
+| SbieSvc.exe（官方签名版，必须运行）<-ALPC->  SbieDrv.sys（官方签名版）      |
+|  进程/文件/SbieIni 服务器             隔离引擎、重定向、WFP 网络过滤        |
 +-----------------------------------+-----------------------------------------+
                           注入 SbieDll.dll（沙箱进程内）
 ```
@@ -260,12 +305,14 @@
 | 阶段 | 功能 | 验证方式 |
 |---|---|---|
 | 1 | 版本探测与沙箱枚举 | `SbieApi_GetVersion` 返回正常；`EnumBoxesEx` 结果与官方界面一致 |
-| 2 | 进程列表与启动/终止 | 启动记事本入沙后能在列表看到；终止后列表消失 |
+| 2 | 进程列表、启动与终止 | 启动记事本入沙后能在列表看到；终止后列表消失 |
 | 3 | 配置读改写 | 写入后 `QueryConf` 回读一致；重启 UI 后仍然生效 |
 | 4 | 文件管控 | 写 `OpenFilePath` 后宿主文件可直接读写；`ClosedFilePath` 后访问被拒 |
-| 5 | 文件恢复 | 沙箱内生成文件，恢复到宿主成功；含重解析点的用例被拒绝或妥善处理 |
+| 5 | 文件恢复 | 沙箱内生成文件，手动恢复到宿主成功；含重解析点的用例被拒绝或妥善处理 |
 | 6 | 网络管控 | `AllowNetworkAccess=n` 后目标进程不能联网；`QueryConf` 回读与实测一致 |
-| 7 | 消息通道 | 触发崩溃消息，UI 弹窗显示；若无法成为 leader，验证日志文件兜底路径 |
+| 7 | 消息通道 | 配置 `LogFile` 注册表值；触发崩溃消息，确认文本文件出现新行且 UI 弹窗显示 |
+
+阶段 7 是消息能力的全部：不要实现依赖 session leader 的弹窗、监控或自动恢复交互。
 
 ## 7. 参考源码索引
 
@@ -273,20 +320,24 @@
 |---|---|
 | `Sandboxie/core/dll/sbieapi.h` | `SbieApi_*` 接口清单与参数说明 |
 | `Sandboxie/core/dll/sbiedll.h` | `SbieDll_*` 接口与 PATH 标志 |
-| `Sandboxie/core/dll/sbieapi.c` | 各接口的具体实现，可确认参数校验细节 |
+| `Sandboxie/core/dll/sbieapi.c` | 各接口的实现，可确认参数校验细节 |
 | `Sandboxie/core/drv/api_defs.h` | API 函数码与参数结构 |
-| `Sandboxie/core/drv/api.c` | 各 API 的驱动侧处理与权限校验 |
-| `Sandboxie/core/drv/session.c` | session leader 与相关校验 |
+| `Sandboxie/core/drv/api.c` | 各 API 的驱动侧处理与权限校验（`Api_GetMessage` 的 leader 校验在这里） |
+| `Sandboxie/core/drv/session.c` | session leader、监控与相关签名校验 |
 | `Sandboxie/core/drv/verify.c` | 签名校验实现与内嵌公钥 |
+| `Sandboxie/core/drv/util.c` | `MyIsCallerSigned`：测试签名模式与 `.sig` 校验逻辑 |
 | `Sandboxie/core/drv/conf_user.c` | 沙箱配置与 `Enabled` 语义 |
 | `Sandboxie/core/drv/file.c` | 文件规则（Open、Closed、Read、Write）的实现 |
 | `Sandboxie/core/drv/wfp.c` | 网络规则加载与 WFP 行为 |
 | `Sandboxie/common/netfw.c` | `NetworkAccess` 规则解析 |
 | `Sandboxie/common/defines.h` | CONF 操作码与长度常量 |
 | `Sandboxie/core/svc/msgids.h` | 服务消息 ID |
-| `Sandboxie/core/svc/InteractiveWire.h` | 交互队列请求结构 |
+| `Sandboxie/core/svc/InteractiveWire.h` | 交互队列请求结构（本项目不可用，只作了解） |
 | `Sandboxie/core/svc/sbieiniserver.cpp` | 配置写入与自动拉起界面逻辑 |
+| `Sandboxie/core/svc/DriverAssistLog.cpp` | 服务日志文件格式与"跳过三类通知"的行为 |
+| `Sandboxie/core/svc/PipeServer.cpp` | `IsCallerSigned`：服务端对调用方签名的校验 |
+| `Sandboxie/core/svc/ProcessServer.cpp` | 更新通道的签名校验点 |
 | `SandboxiePlus/QSbieAPI/SbieAPI.cpp` | 官方参考客户端：连接、消息循环、配置读写 |
-| `SandboxiePlus/QSbieAPI/Sandboxie/SandBox.cpp` | 官方参考：沙箱管理与交互队列使用 |
+| `SandboxiePlus/QSbieAPI/Sandboxie/SandBox.cpp` | 官方参考：沙箱管理与启动流程 |
 | `SandboxiePlus/SandMan/SandManRecovery.cpp` | 官方参考：文件恢复实现 |
 | `UItest/README.md` | 本仓库最小原型已验证的结论与限制 |
