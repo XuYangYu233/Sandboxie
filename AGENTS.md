@@ -64,7 +64,7 @@ Components are independently built. Communication between the driver, service, D
 - Don't silently break the `Sandboxie.ini`, `Sandboxie-Plus.ini`, `Templates.ini` formats or the driver/service/DLL IPC protocol.
 - Keep Windows 7+ (64-bit) support unless told otherwise.
 - Match the existing style of the file you're editing, surrounding code, and `.editorconfig`, avoiding any reformatting of unrelated lines, except for repository-wide style and formatting overhauls isolated in a dedicated pull request.
-- Never commit, create or delete branches, reset files, clean the worktree, or push changes unless the user explicitly requests that exact operation.
+- Commit every change immediately (see *Git workflow* below). Never push, create or delete branches, reset files, or clean the worktree unless the user explicitly requests that exact operation.
 - Reflect significant changes in `CHANGELOG.md`.
 - Link to any related issue when possible.
 
@@ -87,6 +87,14 @@ Components are independently built. Communication between the driver, service, D
 - If repository code and documentation disagree, explain the discrepancy instead of silently choosing one interpretation.
 - Give extra scrutiny to kernel-mode code, IPC/protocol changes, and sandbox security boundaries.
 - Flag pull requests that bundle multiple unrelated changes and suggest splitting.
+
+## Git workflow (fork-specific, enforced)
+
+**智能体必须遵守以下规定（本节优先于上文关于提交与推送的限制）：**
+
+- 每次完成修改后必须立即提交（`git commit`），不得留下未提交的改动。
+- 不得自行执行 `git push`（包括任何分支或标签）。
+- 仅当用户明确说明要 push 时，智能体才将改动整理为一个 PR（整理/合并提交记录 → 推送到功能分支 → 创建 Pull Request）后再推送。
 
 ## Pull requests
 
