@@ -30,7 +30,7 @@
 | 接口层 | `SbieApi_*` / `SbieDll_*` 导出 + 服务消息协议 | 由新 UI 调用，其中受签名保护的部分不可用 |
 | 界面层 | `SbieCtrl.exe` / `SandMan.exe` / Shell 扩展 | 可替换；官方界面若保留运行，可作为唯一合法的签名界面继续存在 |
 
-一句话：**运行期依赖 4 个二进制（`SbieDrv.sys`、`SbieSvc.exe`、`SbieDll.dll`、`SbieMsg.dll`）与 2 个配置文件（`Sandboxie.ini`、`Templates.ini`），全部使用官方原版；三大功能中"沙箱管理、文件管控、网络管控"的主体可用，但消息弹窗、活动监控、强制入沙开关、官方更新通道等受签名保护的能力永久不可用。新 UI 不需要、也不允许修改任何核心源文件。**
+一句话：**运行期依赖 4 个二进制（`SbieDrv.sys`、`SbieSvc.exe`、`SbieDll.dll`、`SbieMsg.dll`）与 2 个配置文件（`Sandboxie.ini`、`Templates.ini`），全部使用官方原版；三大功能中"沙箱管理、文件管控、网络管控"的主体可用，但消息弹窗、活动监控、强制入沙开关等受签名保护的能力永久不可用。新 UI 不需要、也不允许修改任何核心源文件。**
 
 ### 1.1 永久不可用能力速览
 
@@ -44,7 +44,6 @@
 | 禁用强制入沙的开关（`SbieApi_DisableForceProcess` 的设置方向） | 驱动 `MyIsCallerSigned` | 永久不可用（查询方向可用） |
 | 进程豁免控制 `SbieApi_ProcessExemptionControl` | 驱动 `MyIsCallerSigned` | 永久不可用 |
 | 安全参数写入 `API_SET_SECURE_PARAM` | 驱动 `MyIsCallerSigned` | 永久不可用 |
-| 官方更新通道 `MSGID_PROCESS_RUN_UPDATER`（UpdUtil） | 服务端 `PipeServer::IsCallerSigned` | 永久不可用；更新只能由用户运行官方安装包 |
 | 证书门控功能：隐私模式、安全增强、加密沙箱、`NetworkDnsFilter`、`NetworkUseProxy` 等 | 驱动 `Verify_CertInfo` 与设置的 `Requirements=c*` | 永久不可用（写入也会被忽略或导致进程被处置） |
 | 重新编译并替换核心组件 | 各组件的 `.sig` 校验（如服务启动时的 `API_SET_SERVICE_PORT`） | 禁止：自编译产物签名不匹配，会导致服务初始化失败等连锁问题 |
 
@@ -62,7 +61,6 @@
 | `Templates.ini` | 由**驱动**启动时从安装目录读取 | 模板展开与默认值来源 | 必须（官方驱动依赖，缺失会导致默认值不完整） |
 | `Start.exe` | 由 UI、快捷方式或脚本调用 | 命令行入沙启动、`run_sbie_ctrl` 拉起界面 | 可选（官方签名版） |
 | `SbieIni.exe` | 由 UI 调用 | 配置查询修改命令行工具 | 可选（官方签名版） |
-| `KmdUtil.exe` | 由安装器调用 | 驱动与服务的安装、启停 | 安装时使用（官方签名版） |
 
 补充：
 
@@ -182,14 +180,6 @@
 
 服务自动拉起界面的约定（`sbieiniserver.cpp` 的 `RunSbieCtrl`）仍然可用：用户设置 `SbieCtrl_AutoStartAgent` 指定程序与参数（缺省回退 `SbieCtrl.exe`），由服务从安装目录启动；`SbieCtrl_EnableAutoStart=n` 可禁止。**注意：被拉起不等于获得消息权限，本项目的 UI 仍只能靠日志文件显示消息。**
 
-### 3.6 更新与维护
-
-| 功能 | 依赖 | 结论 |
-|---|---|---|
-| 官方更新通道 `MSGID_PROCESS_RUN_UPDATER` | 服务端 `PipeServer::IsCallerSigned` | 永久不可用；UI 不应实现"一键更新/安装驱动" |
-| 官方安装包（Inno Setup / NSIS） | 用户手工运行 | 更新与修复都由用户运行官方安装包完成 |
-| 服务日志文件配置 | 管理员写入注册表值 | 一次性配置，可由安装脚本或手动完成 |
-
 ## 4. 需要修改的文件
 
 在硬约束下，修改面被压缩到"核心之外"。原则：**凡是要重新编译核心组件的改动，一律不做；凡是会让官方二进制失去 `.sig` 的替换，一律不做。**
@@ -229,7 +219,6 @@
 - 驱动内嵌 ECDSA-P256 公钥，用可执行文件旁边的 `.sig` 校验调用进程（`core/drv/verify.c` 的 `KphVerifyCurrentProcess` 与 `core/drv/util.c` 的 `MyIsCallerSigned`）。
 - 受校验的操作包括：`API_SESSION_LEADER`（设置方向）、`API_SET_SERVICE_PORT`、`API_PROCESS_EXEMPTION_CONTROL`、`API_SET_SECURE_PARAM`、`API_FORCE_CHILDREN`、`API_DISABLE_FORCE_PROCESS`（设置方向）。
 - 新 UI 没有 `.sig`，上述操作必然失败（`STATUS_INVALID_SIGNATURE`，即 `0xC000A000`）。因此会话领导权、驱动消息日志、活动监控、交互队列、强制入沙开关等能力在本项目中不存在替代实现路径，只能改用第 3.5 节的服务日志文件，或干脆不做这些功能。
-- 服务侧的更新通道同样校验调用方（`PipeServer::IsCallerSigned` 用于 `RunUpdaterHandler`），未签名 UI 无法触发 `UpdUtil`，因此**不要实现应用内自动更新**。
 
 ### 5.2 协议与 ABI 漂移
 
@@ -239,7 +228,7 @@
 
 ### 5.3 配置写入路径
 
-- 必须通过 `SbieApi_UpdateConf` 写入（驱动转交服务端 `SbieIniServer`），不要直接改 `Sandboxie.ini`：服务需要对写操作串行化、加锁、更新内存缓存并通知驱动重载；绕过它会与缓存和锁竞争，出现"改了不生效或部分生效"。
+- 必须通过 `SbieApi_UpdateConf` 写入（驱动转交服务端 `SbieIniServer`），不要直接改 `Sandboxie.ini`：服务需要对写操作串行化、加锁、刷新内存缓存并通知驱动重载；绕过它会与缓存和锁竞争，出现"改了不生效或部分生效"。
 - 写入后按需调用 `SbieApi_ReloadConf`，并用 `SbieApi_QueryConf` 回读确认。
 - 便携模式与系统模式路径不同，应使用 `SbieApi_GetHomePath`，不要硬编码 `C:\Windows\Sandboxie.ini`。
 
@@ -263,7 +252,7 @@
 
 ### 5.7 进程与权限
 
-- UI 应作为普通用户进程运行：它要处理来自沙箱（不可信）的请求；若为了写配置或装服务而常驻管理员权限，会把 UI 变成高价值攻击面。唯一需要提权的是一次性的注册表配置（如 `LogFile`）与安装动作。
+- UI 应作为普通用户进程运行：它要处理来自沙箱（不可信）的请求；常驻管理员权限会把 UI 变成高价值攻击面。唯一需要提权的是一次性的注册表配置（如 `LogFile`）。
 - 提权失败要可降级：拿不到 UAC 只应影响消息日志通道，不应让主界面不可用。
 
 ### 5.8 版本与平台矩阵
@@ -275,7 +264,7 @@
 
 | 风险 | 等级 | 触发条件 | 主要后果 |
 |---|---|---|---|
-| 依赖签名能力（leader、监控、队列、更新） | 高 | 设计时未确认接口是否受保护 | 功能永久不可用，返工 |
+| 依赖签名能力（leader、监控、队列） | 高 | 设计时未确认接口是否受保护 | 功能永久不可用，返工 |
 | 手改 Sandboxie.ini | 高 | 绕过 `SbieApi_UpdateConf` | 配置不生效、缓存不一致 |
 | 恢复文件跟随重解析点 | 高 | 直接按字符串路径复制 | 可能覆盖任意宿主文件 |
 | 网络规则键名写错 | 中 | 未回读校验 | 假安全：显示阻断但可联网 |
@@ -335,8 +324,6 @@
 | `Sandboxie/core/svc/InteractiveWire.h` | 交互队列请求结构（本项目不可用，只作了解） |
 | `Sandboxie/core/svc/sbieiniserver.cpp` | 配置写入与自动拉起界面逻辑 |
 | `Sandboxie/core/svc/DriverAssistLog.cpp` | 服务日志文件格式与"跳过三类通知"的行为 |
-| `Sandboxie/core/svc/PipeServer.cpp` | `IsCallerSigned`：服务端对调用方签名的校验 |
-| `Sandboxie/core/svc/ProcessServer.cpp` | 更新通道的签名校验点 |
 | `SandboxiePlus/QSbieAPI/SbieAPI.cpp` | 官方参考客户端：连接、消息循环、配置读写 |
 | `SandboxiePlus/QSbieAPI/Sandboxie/SandBox.cpp` | 官方参考：沙箱管理与启动流程 |
 | `SandboxiePlus/SandMan/SandManRecovery.cpp` | 官方参考：文件恢复实现 |
