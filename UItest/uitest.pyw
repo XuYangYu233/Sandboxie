@@ -26,6 +26,58 @@ from sbie_api import SbieAPI, SbieError
 
 REFRESH_MS = 3000
 
+# 配置编辑器：勾选式布尔选项（设置名 -> 中文标签），分类排列。
+# 设置名与 SandMan 的 Options* 页面一致（见 SandboxiePlus/SandMan/Windows/）。
+CFG_OPTION_CATEGORIES = [
+    ("常规", [
+        ("Enabled", "启用此沙箱（取消勾选将禁用沙箱）"),
+        ("AutoDelete", "自动清空沙箱内容"),
+        ("AutoRemove", "沙箱内容清空后自动移除沙箱"),
+        ("NeverDelete", "禁止删除沙箱内容"),
+        ("NeverRemove", "禁止移除沙箱"),
+        ("SeparateUserFolders", "隔离用户文件夹"),
+    ]),
+    ("安全与权限", [
+        ("DropAdminRights", "降低管理员权限"),
+        ("FakeAdminRights", "伪管理员权限"),
+        ("UseSecurityMode", "安全增强模式"),
+        ("SysCallLockDown", "系统调用封锁"),
+        ("RestrictDevices", "限制设备访问"),
+        ("MsiInstallerExemptions", "MSI 安装器豁免"),
+        ("OpenCredentials", "允许访问凭据"),
+        ("OpenClipboard", "允许访问剪贴板"),
+        ("ClosePrintSpooler", "关闭打印后台服务"),
+        ("AllowSpoolerPrintToFile", "允许打印到文件"),
+        ("BlockInterferePower", "阻止干扰电源管理"),
+        ("NotifyProcessAccessDenied", "进程访问被拒时通知"),
+        ("UseOriginalACLs", "使用原始 ACL"),
+    ]),
+    ("网络", [
+        ("BlockNetworkFiles", "阻止网络文件/共享"),
+        ("BlockNetParam", "阻止网络参数"),
+        ("PromptForInternetAccess", "程序联网时提示"),
+        ("NotifyInternetAccessDenied", "联网被拒时通知"),
+    ]),
+    ("恢复与清理", [
+        ("AutoRecover", "自动恢复文件"),
+        ("UseAutoRecoverIgnoreForQuick", "快速恢复时应用忽略规则"),
+    ]),
+    ("高级", [
+        ("UsePrivacyMode", "隐私模式"),
+        ("NoSecurityIsolation", "关闭安全隔离"),
+        ("NoSecurityFiltering", "关闭安全过滤"),
+        ("DisableForceRules", "禁用强制入沙规则"),
+        ("BlockScreenCapture", "阻止屏幕捕获"),
+        ("HideDiskSerialNumber", "隐藏磁盘序列号"),
+        ("HideNetworkAdapterMAC", "隐藏网卡 MAC"),
+        ("HideFirmwareInfo", "隐藏固件信息"),
+        ("HideNonSystemProcesses", "隐藏非系统进程"),
+        ("StripSystemPrivileges", "剥离系统特权"),
+        ("UseSandboxDesktop", "使用沙箱桌面"),
+        ("UseFileImage", "使用镜像文件沙箱"),
+    ]),
+]
+
 
 class UItestApp:
     """Two lists: sandboxes on the left, their processes on the right."""
@@ -349,13 +401,62 @@ class UItestApp:
 
         win = tk.Toplevel(self.root)
         win.title(f"编辑配置：{box}")
-        win.geometry("680x500")
+        win.geometry("700x620")
         win.transient(self.root)
 
-        frame = ttk.Frame(win, padding=6)
-        frame.pack(fill=tk.BOTH, expand=True)
+        outer = ttk.Frame(win, padding=6)
+        outer.pack(fill=tk.BOTH, expand=True)
 
-        tree = ttk.Treeview(frame, columns=("setting", "value"), show="headings",
+        notebook = ttk.Notebook(outer)
+        notebook.pack(fill=tk.BOTH, expand=True)
+
+        # ---------------------------------------------------------------
+        # 选项页：常用布尔开关，三态勾选框
+        #  1 = 本地启用(y)   0 = 本地禁用(n)   2 = 未设置(继承模板/全局)
+        # ---------------------------------------------------------------
+
+        check_items = []    # 每项 [IntVar, 设置名, 初始状态]
+
+        def bool_state(name):
+            values = section.get(name) or []
+            if not values:
+                return 2
+            val = values[0].strip().lower()
+            if val == "y":
+                return 1
+            if val == "n":
+                return 0
+            return 1        # 其他取值视为启用，可在“手动编辑”页查看
+
+        for cat_title, options in CFG_OPTION_CATEGORIES:
+            page = ttk.Frame(notebook, padding=8)
+            notebook.add(page, text=cat_title)
+            ttk.Label(page, text="勾选=启用(y)　取消勾选=禁用(n)　×=恢复继承（删除本地设置）",
+                      foreground="#888888").pack(anchor=tk.W, pady=(0, 6))
+            for setting, label in options:
+                var = tk.IntVar(value=bool_state(setting))
+                row = ttk.Frame(page)
+                row.pack(fill=tk.X, pady=(1, 1))
+                cb = tk.Checkbutton(row, text=label, variable=var,
+                                    onvalue=1, offvalue=0, tristatevalue=2,
+                                    anchor="w")
+                cb.pack(side=tk.LEFT)
+                cb._sbie_setting = setting
+                cb._sbie_var = var
+                clear = ttk.Button(row, text="×", width=2,
+                                   command=lambda v=var: v.set(2))
+                clear.pack(side=tk.LEFT, padx=(4, 0))
+                clear._sbie_setting = setting
+                check_items.append([var, setting, bool_state(setting)])
+
+        # ---------------------------------------------------------------
+        # 手动编辑页：设置名/值 表格（可双击编辑、添加/删除行）
+        # ---------------------------------------------------------------
+
+        manual = ttk.Frame(notebook, padding=8)
+        notebook.add(manual, text="手动编辑")
+
+        tree = ttk.Treeview(manual, columns=("setting", "value"), show="headings",
                             selectmode="extended")
         tree.heading("setting", text="设置名")
         tree.column("setting", width=200, anchor=tk.W)
@@ -370,7 +471,7 @@ class UItestApp:
                     tree.insert("", tk.END, values=(setting, value))
 
         def edit_item(item, col):
-            """Open a small entry over the cell for in-place editing."""
+            """在该单元格上弹出输入框进行行内编辑。"""
             values = list(tree.item(item, "values"))
             if not item or not values or col >= len(values):
                 return
@@ -413,7 +514,7 @@ class UItestApp:
         tree.bind("<Double-1>", edit_cell)
 
         def add_row():
-            """Add a row and start editing its setting cell right away."""
+            """新增一行并立即进入“设置名”单元格编辑。"""
             item = tree.insert("", tk.END, values=("", ""))
             tree.selection_set(item)
             tree.see(item)
@@ -423,36 +524,60 @@ class UItestApp:
             for item in tree.selection():
                 tree.delete(item)
 
-        def save():
+        def refresh_all():
+            """保存失败后按实际状态刷新选项与表格。"""
             nonlocal section
-            entries = [tree.item(item, "values") for item in tree.get_children()]
-            entries = [entry for entry in entries if (entry[0] or "").strip()]
             try:
+                section = self.api.get_section(box)
+            except SbieError:
+                section = {}
+            load_rows()
+            for item in check_items:
+                state = bool_state(item[1])
+                item[0].set(state)
+                item[2] = state
+
+        def save():
+            try:
+                # 1) 先应用手动表格的增删改
+                entries = [tree.item(item, "values") for item in tree.get_children()]
+                entries = [entry for entry in entries if (entry[0] or "").strip()]
                 self.api.update_section(box, entries)
+                # 2) 再应用选项页差异（同一设置两处都改时，选项页优先）
+                for item in check_items:
+                    var, setting, initial = item
+                    cur = var.get()
+                    if cur == initial:
+                        continue
+                    if cur == 1:
+                        self.api.set_setting(box, setting, "y")
+                    elif cur == 0:
+                        self.api.set_setting(box, setting, "n")
+                    else:
+                        self.api.set_setting(box, setting, "")
                 self.api.reload_conf()
             except (SbieError, ValueError) as e:
                 messagebox.showerror("保存配置", str(e))
-                try:
-                    section = self.api.get_section(box)
-                except SbieError:
-                    section = {}
-                load_rows()
+                refresh_all()
                 return
             win.destroy()
             self.refresh()
 
         load_rows()
 
-        bar = ttk.Frame(frame)
-        bar.pack(fill=tk.X, pady=(6, 0))
-        ttk.Button(bar, text="添加行", command=add_row).pack(side=tk.LEFT)
-        ttk.Button(bar, text="删除选中行", command=delete_rows).pack(
+        mbar = ttk.Frame(manual)
+        mbar.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(mbar, text="添加行", command=add_row).pack(side=tk.LEFT)
+        ttk.Button(mbar, text="删除选中行", command=delete_rows).pack(
             side=tk.LEFT, padx=(6, 0))
+        ttk.Label(mbar, text="提示：双击单元格可直接编辑。",
+                  foreground="#888888").pack(side=tk.RIGHT)
+
+        bar = ttk.Frame(outer)
+        bar.pack(fill=tk.X, pady=(6, 0))
         ttk.Button(bar, text="保存", command=save).pack(side=tk.RIGHT)
         ttk.Button(bar, text="取消", command=win.destroy).pack(
             side=tk.RIGHT, padx=(6, 0))
-        ttk.Label(frame, text="提示：双击单元格可直接编辑。",
-                  foreground="#888888").pack(fill=tk.X, pady=(4, 0))
 
 
 def load_api(root, sbie_home):
