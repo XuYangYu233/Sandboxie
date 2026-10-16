@@ -78,11 +78,11 @@ class SbieError(RuntimeError):
         self.status = status
         self.hint = hint
         if hint is not None:
-            message = f"{func} failed: {hint}"
+            message = f"{func}：{hint}"
         elif status is None:
-            message = f"{func} failed"
+            message = f"{func} 调用失败"
         else:
-            message = f"{func} failed (0x{status & 0xFFFFFFFF:08X})"
+            message = f"{func} 调用失败 (0x{status & 0xFFFFFFFF:08X})"
         super().__init__(message)
 
 
@@ -314,7 +314,7 @@ class SbieAPI:
         idx = index | CONF_GET_NO_TEMPLS | CONF_GET_NO_GLOBAL | CONF_GET_NO_EXPAND
         rc = self._dll.SbieApi_QueryConf(section, setting, idx, buf, max_len)
         if rc == STATUS_RESOURCE_NAME_NOT_FOUND:
-            raise SbieError("SbieApi_QueryConf", rc, hint="setting not found")
+            raise SbieError("SbieApi_QueryConf", rc, hint="未找到该设置")
         if rc != STATUS_SUCCESS:
             raise SbieError("SbieApi_QueryConf", rc)
         return buf.value
@@ -358,16 +358,16 @@ class SbieAPI:
         """
         op = {"set": "s", "append": "a", "insert": "i", "delete": "d"}.get(mode)
         if op is None:
-            raise ValueError(f"invalid mode: {mode!r}")
+            raise ValueError(f"无效的模式：{mode!r}")
         if not section:
-            raise ValueError("section must not be empty")
+            raise ValueError("段名不能为空")
         status = self._dll.SbieDll_UpdateConf(op, password or "", section,
                                               setting, value or "")
         if status == STATUS_SUCCESS:
             return
         if status == STATUS_WRONG_PASSWORD:
             raise SbieError("SbieDll_UpdateConf", status,
-                            hint="the config is protected by a password; use SandMan to unlock it")
+                            hint="配置受密码保护，请使用 SandMan 解锁")
         raise SbieError("SbieDll_UpdateConf", status)
 
     def reload_conf(self, flags=0):
@@ -380,17 +380,17 @@ class SbieAPI:
         """Raise ValueError unless `name` is a valid new sandbox name."""
         name = (name or "").strip()
         if not name or len(name) > BOXNAME_COUNT - 2:
-            raise ValueError("name is empty or longer than 38 characters")
+            raise ValueError("沙箱名为空或超过 38 个字符")
         def _ok(ch):
             return (ch.isascii() and ch.isalnum()) or ch == "_"
         if not all(_ok(ch) for ch in name):
-            raise ValueError("name may contain only letters, digits and '_'")
+            raise ValueError("沙箱名只能包含字母、数字和下划线")
         reserved = {"aux", "clock$", "con", "nul", "prn"}
         reserved |= {f"com{i}" for i in range(10)}
         reserved |= {f"lpt{i}" for i in range(10)}
         if (name.lower() in reserved or name.lower() == "globalsettings"
                 or name.lower().startswith("usersettings_")):
-            raise ValueError("name is reserved")
+            raise ValueError("该名称被系统保留")
 
     def create_box(self, name):
         """Create a new sandbox (Enabled=y) and reload the configuration."""
@@ -427,7 +427,7 @@ class SbieAPI:
             return False
         if os.path.split(root)[1].lower() != name.lower():
             raise SbieError("delete_box_content",
-                            hint=f"unexpected box folder: {root}")
+                            hint=f"意外的沙箱目录：{root}")
         if not os.path.isdir(root):
             return False
         shutil.rmtree(root)
@@ -445,7 +445,7 @@ class SbieAPI:
         for setting, value in entries:
             setting = (setting or "").strip()
             if not setting or setting == "*":
-                raise ValueError(f"invalid setting name: {setting!r}")
+                raise ValueError(f"无效的设置名：{setting!r}")
             if not value:
                 removed.add(setting)
             else:

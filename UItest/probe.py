@@ -15,38 +15,37 @@ from sbie_api import SbieAPI, SbieError
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sandboxie UItest connectivity probe")
+    parser = argparse.ArgumentParser(description="Sandboxie UItest 连通性检测")
     parser.add_argument("--sbie-home",
-                        help="Sandboxie installation directory (auto-detected if omitted)")
+                        help="Sandboxie 安装目录（省略时自动检测）")
     args = parser.parse_args()
 
     try:
         api = SbieAPI.load(args.sbie_home)
     except (OSError, FileNotFoundError) as e:
-        print(f"FATAL: cannot load SbieDll.dll: {e}")
+        print(f"错误：无法加载 SbieDll.dll：{e}")
         return 1
 
     try:
-        print(f"SbieDll      : {api.home}")
-        print(f"Driver       : {api.version()}")
-        print(f"Home path    : {api.home_path()}")
+        print(f"SbieDll.dll : {api.home}")
+        print(f"驱动版本    : {api.version()}")
+        print(f"安装目录    : {api.home_path()}")
         sandman = os.path.join(api.home, "SandMan.exe")
-        print(f"SandMan.exe  : {'found' if os.path.isfile(sandman) else 'MISSING'} ({sandman})")
+        print(f"SandMan.exe  : {'存在' if os.path.isfile(sandman) else '缺失'} ({sandman})")
         boxes = api.enum_boxes()
-        print(f"Sandboxes    : {len(boxes)} -> {boxes}")
+        print(f"沙箱数量    : {len(boxes)} -> {boxes}")
         for box in boxes:
             pids = api.box_processes(box)
-            print(f"  [{box}] {len(pids)} process(es)")
+            print(f"  [{box}] {len(pids)} 个进程")
             for pid in pids:
                 info = api.query_process(pid)
-                print(f"    pid={pid:<6} image={info['image']:<40} session={info['session']}")
+                print(f"    pid={pid:<6} 映像={info['image']:<40} 会话={info['session']}")
     except SbieError as e:
-        print(f"FATAL: {e}")
-        print("Hint: the driver (SbieDrv) and service (SbieSvc) must be "
-              "installed and running.")
+        print(f"错误：{e}")
+        print("提示：请确认驱动（SbieDrv）和服务（SbieSvc）已安装并运行。")
         return 1
 
-    print("OK")
+    print("检测通过")
     return 0
 
 
