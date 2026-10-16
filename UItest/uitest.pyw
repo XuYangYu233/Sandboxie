@@ -439,30 +439,40 @@ class UItestApp:
                 return "（禁用）"
             return "（继承）"
 
+        def refresh_cb(cb_, var_, label_):
+            state = var_.get()
+            cb_.config(text=label_ + state_suffix(state),
+                       fg="#666666" if state == 2 else "black")
+
         for cat_title, options in CFG_OPTION_CATEGORIES:
             page = ttk.Frame(notebook, padding=8)
             notebook.add(page, text=cat_title)
-            ttk.Label(page, text="勾选=启用(y)　取消勾选=禁用(n)　×=恢复继承（Enabled 除外，防止沙箱消失）",
+            ttk.Label(page, text="☑=本地启用(y)　不勾选=本地禁用(n)　灰色（继承）=未设置，跟随模板/全局　×=清除本地设置（Enabled 除外）",
                       foreground="#888888").pack(anchor=tk.W, pady=(0, 6))
             for setting, label in options:
                 var = tk.IntVar(value=bool_state(setting))
                 row = ttk.Frame(page)
                 row.pack(fill=tk.X, pady=(1, 1))
+                state = bool_state(setting)
+                var = tk.IntVar(value=state)
+                row = ttk.Frame(page)
+                row.pack(fill=tk.X, pady=(1, 1))
                 cb = tk.Checkbutton(
-                    row, text=label + state_suffix(bool_state(setting)),
-                    variable=var, onvalue=1, offvalue=0, tristatevalue=2,
-                    anchor="w")
+                    row, text=label + state_suffix(state),
+                    variable=var, onvalue=1, offvalue=0, anchor="w",
+                    fg="#666666" if state == 2 else "black")
                 cb.config(command=lambda v=var, w=cb, lb=label:
-                           w.config(text=lb + state_suffix(v.get())))
+                           refresh_cb(w, v, lb))
                 cb.pack(side=tk.LEFT)
                 cb._sbie_setting = setting
                 cb._sbie_var = var
                 if setting != "Enabled":
                     clear = ttk.Button(row, text="×", width=2,
-                                       command=lambda v=var: v.set(2))
+                                       command=lambda v=var, w=cb, lb=label:
+                                       (v.set(2), refresh_cb(w, v, lb)))
                     clear.pack(side=tk.LEFT, padx=(4, 0))
                     clear._sbie_setting = setting
-                check_items.append([var, setting, bool_state(setting)])
+                check_items.append([var, setting, state])
 
         # ---------------------------------------------------------------
         # 手动编辑页：设置名/值 表格（可双击编辑、添加/删除行）
