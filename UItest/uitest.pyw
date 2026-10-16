@@ -432,6 +432,13 @@ class UItestApp:
                 return 0
             return 1        # 其他取值视为启用，可在“手动编辑”页查看
 
+        def state_suffix(state):
+            if state == 1:
+                return "（启用）"
+            if state == 0:
+                return "（禁用）"
+            return "（继承）"
+
         for cat_title, options in CFG_OPTION_CATEGORIES:
             page = ttk.Frame(notebook, padding=8)
             notebook.add(page, text=cat_title)
@@ -441,9 +448,12 @@ class UItestApp:
                 var = tk.IntVar(value=bool_state(setting))
                 row = ttk.Frame(page)
                 row.pack(fill=tk.X, pady=(1, 1))
-                cb = tk.Checkbutton(row, text=label, variable=var,
-                                    onvalue=1, offvalue=0, tristatevalue=2,
-                                    anchor="w")
+                cb = tk.Checkbutton(
+                    row, text=label + state_suffix(bool_state(setting)),
+                    variable=var, onvalue=1, offvalue=0, tristatevalue=2,
+                    anchor="w")
+                cb.config(command=lambda v=var, w=cb, lb=label:
+                           w.config(text=lb + state_suffix(v.get())))
                 cb.pack(side=tk.LEFT)
                 cb._sbie_setting = setting
                 cb._sbie_var = var
