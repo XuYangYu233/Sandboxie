@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from sbie_api import SbieAPI, SbieError
 
@@ -63,6 +63,17 @@ class UItestApp:
         self.btn_kill = ttk.Button(toolbar, text="Terminate Process",
                                    command=self.on_kill, state=tk.DISABLED)
         self.btn_kill.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.btn_new = ttk.Button(toolbar, text="New Box...", command=self.on_new_box)
+        self.btn_new.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.btn_edit = ttk.Button(toolbar, text="Edit Config...",
+                                   command=self.on_edit_config, state=tk.DISABLED)
+        self.btn_edit.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.btn_delete = ttk.Button(toolbar, text="Delete Box",
+                                     command=self.on_delete_box, state=tk.DISABLED)
+        self.btn_delete.pack(side=tk.LEFT, padx=(6, 0))
         self.btn_sandman = ttk.Button(toolbar, text="Open SandMan",
                                       command=self.on_open_sandman)
         self.btn_sandman.pack(side=tk.LEFT, padx=(6, 0))
@@ -123,6 +134,9 @@ class UItestApp:
         self.btn_run.config(state=tk.NORMAL if self.selected_box() else tk.DISABLED)
         self.btn_kill.config(state=tk.NORMAL if self.selected_pid() is not None
                              else tk.DISABLED)
+        has_box = self.selected_box() is not None
+        self.btn_edit.config(state=tk.NORMAL if has_box else tk.DISABLED)
+        self.btn_delete.config(state=tk.NORMAL if has_box else tk.DISABLED)
 
     # -- SandMan integration ------------------------------------------------
 
@@ -280,6 +294,116 @@ class UItestApp:
         except SbieError as e:
             messagebox.showerror("Terminate Process", str(e))
         self.root.after(300, self.refresh)
+
+    # -- box management ---------------------------------------------------
+
+    def on_new_box(self):
+        """Create a new sandbox."""
+        name = simpledialog.askstring(
+            "New Box", "Sandbox name (letters, digits, '_'):", parent=self.root)
+        if name is None:
+            return
+        try:
+            self.api.create_box(name.strip())
+        except (SbieError, ValueError) as e:
+            messagebox.showerror("New Box", str(e))
+            return
+        self.refresh()
+
+    def on_delete_box(self):
+        """Remove the selected sandbox config (optionally the content too)."""
+        box = self.selected_box()
+        if not box:
+            return
+        delete_content = messagebox.askyesno(
+            "Delete Box",
+            f"Delete the sandbox '{box}'?\n\n"
+            "The configuration section will be removed from Sandboxie.ini.\n\n"
+            "Also delete the box content folder? (No keeps the files)")
+        if delete_content is None:
+            return
+        try:
+            removed_content = self.api.delete_box_content(box) if delete_content else False
+            self.api.remove_box(box)
+        except (SbieError, OSError) as e:
+            messagebox.showerror("Delete Box", str(e))
+            return
+        self.refresh()
+        messagebox.showinfo(
+            "Delete Box",
+            f"Sandbox '{box}' removed"
+            + (" (content deleted)" if removed_content else " (content kept)"))
+
+    def on_edit_config(self):
+        """Open the config editor for the selected sandbox."""
+        box = self.selected_box()
+        if box:
+            self._open_config_editor(box)
+
+    def _open_config_editor(self, box):
+        try:
+            section = self.api.get_section(box)
+        except SbieError as e:
+            messagebox.showerror("Edit Config", str(e))
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Edit config: {box}")
+        win.geometry("680x500")
+        win.transient(self.root)
+
+        frame = ttk.Frame(win, padding=6)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        tree = ttk.Treeview(frame, columns=("setting", "value"), show="headings",
+                            selectmode="extended")
+        tree.heading("setting", text="Setting")
+        tree.column("setting", width=200, anchor=tk.W)
+        tree.heading("value", text="Value")
+        tree.column("value", width=420, anchor=tk.W)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        def load_rows():
+            tree.delete(*tree.get_children())
+            for setting, values in section.items():
+                for value in values:
+                    tree.insert("", tk.END, values=(setting, value))
+
+        def add_row():
+            tree.insert("", tk.END, values=("", ""))
+
+        def delete_rows():
+            for item in tree.selection():
+                tree.delete(item)
+
+        def save():
+            nonlocal section
+            entries = [tree.item(item, "values") for item in tree.get_children()]
+            entries = [entry for entry in entries if (entry[0] or "").strip()]
+            try:
+                self.api.update_section(box, entries)
+                self.api.reload_conf()
+            except (SbieError, ValueError) as e:
+                messagebox.showerror("Save Config", str(e))
+                try:
+                    section = self.api.get_section(box)
+                except SbieError:
+                    section = {}
+                load_rows()
+                return
+            win.destroy()
+            self.refresh()
+
+        load_rows()
+
+        bar = ttk.Frame(frame)
+        bar.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(bar, text="Add Row", command=add_row).pack(side=tk.LEFT)
+        ttk.Button(bar, text="Delete Row(s)", command=delete_rows).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT)
+        ttk.Button(bar, text="Cancel", command=win.destroy).pack(
+            side=tk.RIGHT, padx=(6, 0))
 
 
 def load_api(root, sbie_home):

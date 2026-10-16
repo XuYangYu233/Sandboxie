@@ -14,7 +14,7 @@ compiled.
 |---|---|
 | Isolation engine (driver), service, injection | official Sandboxie Plus core, untouched |
 | Message popups, activity monitoring, interactive queue (signed session-leader features) | official SandMan UI, kept running |
-| Basic management: list boxes, run in box, terminate processes | this shell (via `SbieDll.dll`) |
+| Basic management: list boxes, run/terminate processes, create/edit/delete box config | this shell (via `SbieDll.dll`) |
 | Advanced management (options, snapshots, recovery, templates) | official SandMan UI - use the "Open SandMan" button |
 
 ## How it works
@@ -30,6 +30,9 @@ of the stable exported API:
 | `SbieApi_SessionLeader` (query only) | show which official UI owns the session-leader role |
 | `SbieDll_RunSandboxed` | start a program inside a sandbox (service request) |
 | `SbieDll_KillOne` | terminate a sandboxed process |
+| `SbieApi_QueryConf`, `SbieApi_ReloadConf` | list/read box settings; reload the config |
+| `SbieDll_UpdateConf` | write one setting through the SbieSvc service (create box, edit policy, delete box) |
+| `SbieApi_QueryBoxPath` | resolve the box content folder (for content deletion) |
 
 No part of the Sandboxie build tree is required, and nothing is compiled.
 The DLL location is resolved in this order:
@@ -69,7 +72,9 @@ python UItest\uitest.pyw --selftest 3
 The window shows the sandbox list on the left and the process list of the
 selected sandbox on the right.  It refreshes every 3 seconds; "Run in Box..."
 starts a picked program inside the selected sandbox and "Terminate Process"
-kills the selected process (with a confirmation prompt).  "Open SandMan"
+kills the selected process (with a confirmation prompt).  "New Box..." creates a
+sandbox, "Edit Config..." opens the setting editor of the selected box and
+"Delete Box" removes it (optionally with its content).  "Open SandMan"
 starts (or activates) the official UI for anything advanced.
 
 ## Relationship with SandMan
@@ -83,9 +88,10 @@ starts (or activates) the official UI for anything advanced.
 
 ## Known limitations
 
-- Minimal feature set on purpose: no box creation/deletion, no settings
-  editor, no file recovery, no tray icon, no notifications - the official
-  UI remains the tool for those.
+- Kept intentionally out of scope: sandbox rename, snapshots, file recovery
+  UI, template wizards, ImDisk mounting, suspend/resume, editing
+  password-protected configs - the official SandMan UI remains the tool for
+  those.
 - `SbieDll_RunStartExe` cannot be used from a plain host process (it depends
   on `Dll_HomeDosPath`, which SbieDll only initializes when injected into a
   sandboxed process); `SbieDll_RunSandboxed` is used instead.

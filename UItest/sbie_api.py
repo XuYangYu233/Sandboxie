@@ -26,6 +26,15 @@ CURRENT_SESSION = 0xFFFFFFFF
 
 STATUS_SUCCESS = 0
 
+# flags for the SbieApi_QueryConf setting_index (see core/drv/api_flags.h)
+CONF_GET_NO_EXPAND = 0x20000000
+CONF_GET_NO_GLOBAL = 0x40000000
+CONF_GET_NO_TEMPLS = 0x10000000
+
+# extra NTSTATUS codes used by the configuration APIs / service
+STATUS_RESOURCE_NAME_NOT_FOUND = 0xC0000223
+STATUS_WRONG_PASSWORD = 0xC000006A
+
 
 class STARTUPINFO(ctypes.Structure):
     """Subset of the Win32 STARTUPINFO structure (full layout)."""
@@ -64,10 +73,13 @@ class PROCESS_INFORMATION(ctypes.Structure):
 class SbieError(RuntimeError):
     """Raised when an API call does not succeed."""
 
-    def __init__(self, func, status=None):
+    def __init__(self, func, status=None, hint=None):
         self.func = func
         self.status = status
-        if status is None:
+        self.hint = hint
+        if hint is not None:
+            message = f"{func} failed: {hint}"
+        elif status is None:
             message = f"{func} failed"
         else:
             message = f"{func} failed (0x{status & 0xFFFFFFFF:08X})"
@@ -114,6 +126,33 @@ def _find_home(sbie_home=None):
         "Sandboxie was not found; searched: " + "; ".join(candidates) +
         ". If Sandboxie is installed in a custom folder, pass --sbie-home PATH "
         "or set the SBIE_HOME environment variable.")
+
+
+def _nt_to_dos(path):
+    """Convert an NT namespace path to a Win32 DOS path (best effort).
+
+    Handles the two common shapes returned by SbieApi_QueryBoxPath:
+    \\??\\C:\... and \\Device\\HarddiskVolumeN\... (mapped via
+    QueryDosDeviceW); anything else is returned unchanged.
+    """
+    if path.startswith("\\??\\"):
+        return path[4:]
+    if path.startswith("\\Device\\"):
+        prefix = "\\Device\\"
+        target = None
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = letter + ":"
+            buf = ctypes.create_unicode_buffer(256)
+            n = ctypes.windll.kernel32.QueryDosDeviceW(drive, buf, 256)
+            if not n:
+                continue
+            name = buf.value
+            if path == name or path.startswith(name + "\\"):
+                target = (letter + ":", name)
+                break
+        if target:
+            return target[0] + path[len(target[1]):]
+    return path
 
 
 class SbieAPI:
@@ -174,6 +213,27 @@ class SbieAPI:
         d.SbieApi_SessionLeader.argtypes = [ctypes.c_ulong,
                                             ctypes.POINTER(ctypes.c_void_p)]
         d.SbieApi_SessionLeader.restype = ctypes.c_long
+        d.SbieApi_QueryConf.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                        ctypes.c_ulong, ctypes.c_wchar_p,
+                                        ctypes.c_ulong]
+        d.SbieApi_QueryConf.restype = ctypes.c_long
+
+        d.SbieApi_ReloadConf.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+        d.SbieApi_ReloadConf.restype = ctypes.c_long
+
+        d.SbieApi_QueryBoxPath.argtypes = [ctypes.c_wchar_p,
+                                           ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                           ctypes.c_wchar_p,
+                                           ctypes.POINTER(ctypes.c_ulong),
+                                           ctypes.POINTER(ctypes.c_ulong),
+                                           ctypes.POINTER(ctypes.c_ulong)]
+        d.SbieApi_QueryBoxPath.restype = ctypes.c_long
+
+        d.SbieDll_UpdateConf.argtypes = [ctypes.c_wchar, ctypes.c_wchar_p,
+                                         ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                         ctypes.c_wchar_p]
+        d.SbieDll_UpdateConf.restype = ctypes.c_ulong
+
 
     # -- queries ---------------------------------------------------------
 
@@ -246,6 +306,166 @@ class SbieAPI:
         if rc != STATUS_SUCCESS:
             raise SbieError("SbieApi_SessionLeader", rc)
         return pid.value or None
+    # -- configuration (management) ---------------------------------------
+
+    def query_conf(self, section, setting, index=0, max_len=8192):
+        """Read one config value from the driver (local, unexpanded)."""
+        buf = ctypes.create_unicode_buffer(max_len)
+        idx = index | CONF_GET_NO_TEMPLS | CONF_GET_NO_GLOBAL | CONF_GET_NO_EXPAND
+        rc = self._dll.SbieApi_QueryConf(section, setting, idx, buf, max_len)
+        if rc == STATUS_RESOURCE_NAME_NOT_FOUND:
+            raise SbieError("SbieApi_QueryConf", rc, hint="setting not found")
+        if rc != STATUS_SUCCESS:
+            raise SbieError("SbieApi_QueryConf", rc)
+        return buf.value
+
+    def list_settings(self, section):
+        """Return the local setting names of `section` (templates excluded)."""
+        names = []
+        index = 0
+        while True:
+            name = ctypes.create_unicode_buffer(66)
+            idx = index | CONF_GET_NO_TEMPLS | CONF_GET_NO_GLOBAL | CONF_GET_NO_EXPAND
+            rc = self._dll.SbieApi_QueryConf(section, None, idx, name, 66)
+            if rc != STATUS_SUCCESS:
+                break
+            names.append(name.value)
+            index += 1
+        return names
+
+    def get_section(self, section):
+        """Return {setting: [value, ...]} for a config section (local values)."""
+        result = {}
+        for setting in self.list_settings(section):
+            values = []
+            index = 0
+            while index < 512:
+                try:
+                    values.append(self.query_conf(section, setting, index))
+                except SbieError:
+                    break
+                index += 1
+            result[setting] = values
+        return result
+
+    def set_setting(self, section, setting, value="", mode="set", password=None):
+        """Write one config value through the SbieSvc service (official path).
+
+        mode: 'set' replaces a setting (setting '*' with an empty value
+        removes the whole section; an empty value removes the whole setting),
+        'append' and 'insert' add a value line, 'delete' removes the given
+        value line (or the whole setting when the value is empty).
+        """
+        op = {"set": "s", "append": "a", "insert": "i", "delete": "d"}.get(mode)
+        if op is None:
+            raise ValueError(f"invalid mode: {mode!r}")
+        if not section:
+            raise ValueError("section must not be empty")
+        status = self._dll.SbieDll_UpdateConf(op, password or "", section,
+                                              setting, value or "")
+        if status == STATUS_SUCCESS:
+            return
+        if status == STATUS_WRONG_PASSWORD:
+            raise SbieError("SbieDll_UpdateConf", status,
+                            hint="the config is protected by a password; use SandMan to unlock it")
+        raise SbieError("SbieDll_UpdateConf", status)
+
+    def reload_conf(self, flags=0):
+        """Ask the driver to reload its configuration."""
+        rc = self._dll.SbieApi_ReloadConf(0xFFFFFFFF, flags)
+        if rc != STATUS_SUCCESS:
+            raise SbieError("SbieApi_ReloadConf", rc)
+
+    def validate_box_name(self, name):
+        """Raise ValueError unless `name` is a valid new sandbox name."""
+        name = (name or "").strip()
+        if not name or len(name) > BOXNAME_COUNT - 2:
+            raise ValueError("name is empty or longer than 38 characters")
+        def _ok(ch):
+            return (ch.isascii() and ch.isalnum()) or ch == "_"
+        if not all(_ok(ch) for ch in name):
+            raise ValueError("name may contain only letters, digits and '_'")
+        reserved = {"aux", "clock$", "con", "nul", "prn"}
+        reserved |= {f"com{i}" for i in range(10)}
+        reserved |= {f"lpt{i}" for i in range(10)}
+        if (name.lower() in reserved or name.lower() == "globalsettings"
+                or name.lower().startswith("usersettings_")):
+            raise ValueError("name is reserved")
+
+    def create_box(self, name):
+        """Create a new sandbox (Enabled=y) and reload the configuration."""
+        self.validate_box_name(name)
+        self.set_setting(name, "Enabled", "y")
+        self.reload_conf()
+
+    def remove_box(self, name):
+        """Remove the sandbox config section; the content folder is kept."""
+        self.set_setting(name, "*", "", mode="set")
+        self.reload_conf()
+
+    def box_file_root(self, name):
+        """Return the DOS path of the box content folder, or None."""
+        file_path = ctypes.create_unicode_buffer(1024)
+        key_path = ctypes.create_unicode_buffer(1024)
+        ipc_path = ctypes.create_unicode_buffer(1024)
+        file_len = ctypes.c_ulong(1024)
+        key_len = ctypes.c_ulong(1024)
+        ipc_len = ctypes.c_ulong(1024)
+        rc = self._dll.SbieApi_QueryBoxPath(
+            name, file_path, key_path, ipc_path,
+            ctypes.byref(file_len), ctypes.byref(key_len), ctypes.byref(ipc_len))
+        if rc != STATUS_SUCCESS or not file_path.value:
+            return None
+        path = _nt_to_dos(file_path.value)
+        return path.rstrip("\\") or None
+
+    def delete_box_content(self, name):
+        """Delete the sandbox content folder; False when it does not exist."""
+        import shutil
+        root = self.box_file_root(name)
+        if not root:
+            return False
+        if os.path.split(root)[1].lower() != name.lower():
+            raise SbieError("delete_box_content",
+                            hint=f"unexpected box folder: {root}")
+        if not os.path.isdir(root):
+            return False
+        shutil.rmtree(root)
+        return True
+
+    def update_section(self, section, entries):
+        """Apply `entries` (list of (setting, value)) to `section` as a diff.
+
+        Only touched settings are written.  A row with an empty value removes
+        the setting; settings named '' or '*' are rejected so the editor can
+        not remove the whole section by accident.
+        """
+        new = {}
+        removed = set()
+        for setting, value in entries:
+            setting = (setting or "").strip()
+            if not setting or setting == "*":
+                raise ValueError(f"invalid setting name: {setting!r}")
+            if not value:
+                removed.add(setting)
+            else:
+                new.setdefault(setting, []).append(value)
+        old = self.get_section(section)
+        for setting, old_values in old.items():
+            if setting in removed or setting not in new:
+                if old_values:
+                    self.set_setting(section, setting, "", mode="set")
+            elif new[setting] != old_values:
+                self._replace_setting_values(section, setting, new[setting])
+        for setting, values in new.items():
+            if setting not in old and values:
+                self._replace_setting_values(section, setting, values)
+
+    def _replace_setting_values(self, section, setting, values):
+        self.set_setting(section, setting, values[0], mode="set")
+        for value in values[1:]:
+            self.set_setting(section, setting, value, mode="append")
+
 
     # -- actions ---------------------------------------------------------
 
