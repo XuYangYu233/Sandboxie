@@ -140,10 +140,12 @@ class UItestApp:
         left = ttk.Frame(paned, padding=(0, 0, 4, 0))
         paned.add(left, weight=1)
         ttk.Label(left, text="沙箱").pack(anchor=tk.W)
-        self.tree_boxes = ttk.Treeview(left, columns=("box",), show="headings",
+        self.tree_boxes = ttk.Treeview(left, columns=("box", "state"), show="headings",
                                        selectmode="browse")
         self.tree_boxes.heading("box", text="名称")
         self.tree_boxes.column("box", width=200, anchor=tk.W)
+        self.tree_boxes.heading("state", text="状态")
+        self.tree_boxes.column("state", width=90, anchor=tk.W)
         self.tree_boxes.pack(fill=tk.BOTH, expand=True)
         self.tree_boxes.bind("<<TreeviewSelect>>", self._on_box_selected)
 
@@ -246,7 +248,7 @@ class UItestApp:
         """Reload sandboxes and the process list of the selected sandbox."""
         try:
             version = self.api.version()
-            boxes = self.api.enum_boxes()
+            boxes = self.api.list_boxes()
         except SbieError as e:
             self.lbl_status.config(text=f"连接失败：{e}")
             return
@@ -278,10 +280,10 @@ class UItestApp:
     def _fill_boxes(self, boxes):
         current = self.selected_box()
         self.tree_boxes.delete(*self.tree_boxes.get_children())
-        for box in boxes:
-            self.tree_boxes.insert("", tk.END, values=(box,))
-
-        target = current if current in boxes else (boxes[0] if boxes else None)
+        for name, enabled in boxes:
+            self.tree_boxes.insert("", tk.END,
+                               values=(name, "" if enabled else "已禁用"))
+        target = current if current in [b for b, _ in boxes] else (boxes[0][0] if boxes else None)
         if target:
             for item in self.tree_boxes.get_children():
                 if self.tree_boxes.item(item, "values")[0] == target:
@@ -419,6 +421,8 @@ class UItestApp:
 
         def bool_state(name):
             values = section.get(name) or []
+            if name == "Enabled" and not values:
+                return 1        # 无本地 Enabled = 默认启用，始终显示为勾选
             if not values:
                 return 2
             val = values[0].strip().lower()
@@ -431,7 +435,7 @@ class UItestApp:
         for cat_title, options in CFG_OPTION_CATEGORIES:
             page = ttk.Frame(notebook, padding=8)
             notebook.add(page, text=cat_title)
-            ttk.Label(page, text="勾选=启用(y)　取消勾选=禁用(n)　×=恢复继承（删除本地设置）",
+            ttk.Label(page, text="勾选=启用(y)　取消勾选=禁用(n)　×=恢复继承（Enabled 除外，防止沙箱消失）",
                       foreground="#888888").pack(anchor=tk.W, pady=(0, 6))
             for setting, label in options:
                 var = tk.IntVar(value=bool_state(setting))
@@ -443,10 +447,11 @@ class UItestApp:
                 cb.pack(side=tk.LEFT)
                 cb._sbie_setting = setting
                 cb._sbie_var = var
-                clear = ttk.Button(row, text="×", width=2,
-                                   command=lambda v=var: v.set(2))
-                clear.pack(side=tk.LEFT, padx=(4, 0))
-                clear._sbie_setting = setting
+                if setting != "Enabled":
+                    clear = ttk.Button(row, text="×", width=2,
+                                       command=lambda v=var: v.set(2))
+                    clear.pack(side=tk.LEFT, padx=(4, 0))
+                    clear._sbie_setting = setting
                 check_items.append([var, setting, bool_state(setting)])
 
         # ---------------------------------------------------------------
@@ -547,6 +552,8 @@ class UItestApp:
                 for item in check_items:
                     var, setting, initial = item
                     cur = var.get()
+                    if setting == "Enabled" and cur == 2:
+                        cur = 1     # Enabled 不能恢复继承（会删除本地值）
                     if cur == initial:
                         continue
                     if cur == 1:
@@ -555,6 +562,10 @@ class UItestApp:
                         self.api.set_setting(box, setting, "n")
                     else:
                         self.api.set_setting(box, setting, "")
+                # 3) 兜底：沙箱不能丢失 Enabled，否则会从系统中消失
+                after = self.api.get_section(box)
+                if "Enabled" not in after:
+                    self.api.set_setting(box, "Enabled", "y")
                 self.api.reload_conf()
             except (SbieError, ValueError) as e:
                 messagebox.showerror("保存配置", str(e))

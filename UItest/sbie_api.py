@@ -253,20 +253,37 @@ class SbieAPI:
             raise SbieError("SbieApi_GetHomePath", rc)
         return buf.value
 
-    def enum_boxes(self):
-        """Return usable sandbox names (hidden/user-settings entries filtered)."""
-        name = ctypes.create_unicode_buffer(BOXNAME_COUNT)
-        index, boxes = -1, []
+    def list_boxes(self):
+        """Return all sandbox sections as [(name, enabled)], disabled ones included.
+
+        Mirrors QSbieAPI: enumerate every section through the driver (QueryConf
+        with an empty section name) and keep the real sandbox sections; user
+        settings, global settings and template sections are skipped.
+        """
+        result = []
+        index = 0
         while True:
-            index = self._dll.SbieApi_EnumBoxesEx(index, name, True)
-            if index == -1:
+            section = ctypes.create_unicode_buffer(66)
+            rc = self._dll.SbieApi_QueryConf(
+                None, None, index | CONF_GET_NO_TEMPLS | CONF_GET_NO_EXPAND,
+                section, 66)
+            if rc != STATUS_SUCCESS:
                 break
-            box = name.value
-            if not box:
+            index += 1
+            name = section.value
+            if not name:
                 continue
-            if self._dll.SbieApi_IsBoxEnabled(box) == STATUS_SUCCESS:
-                boxes.append(box)
-        return boxes
+            lower = name.lower()
+            if lower == "globalsettings" or lower.startswith(
+                    ("usersettings_", "template_")):
+                continue
+            enabled = self._dll.SbieApi_IsBoxEnabled(name) == STATUS_SUCCESS
+            result.append((name, enabled))
+        return result
+
+    def enum_boxes(self):
+        """Return the names of enabled sandboxes (kept for compatibility)."""
+        return [name for name, enabled in self.list_boxes() if enabled]
 
     def box_processes(self, box):
         """Return the process ids currently running inside `box`."""

@@ -32,9 +32,12 @@ def main():
         print(f"安装目录    : {api.home_path()}")
         sandman = os.path.join(api.home, "SandMan.exe")
         print(f"SandMan.exe  : {'存在' if os.path.isfile(sandman) else '缺失'} ({sandman})")
-        boxes = api.enum_boxes()
-        print(f"沙箱数量    : {len(boxes)} -> {boxes}")
-        for box in boxes:
+        box_info = api.list_boxes()
+        print(f"沙箱数量    : {len(box_info)} -> {[b for b, _ in box_info]}")
+        for box, enabled in box_info:
+            if not enabled:
+                print(f"  [{box}] 已禁用")
+                continue
             pids = api.box_processes(box)
             print(f"  [{box}] {len(pids)} 个进程")
             for pid in pids:
