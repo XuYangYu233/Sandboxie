@@ -8,6 +8,7 @@ and the processes running inside them.  Exits with code 0 on success.
 """
 
 import argparse
+import os
 import sys
 
 from sbie_api import SbieAPI, SbieError
@@ -29,6 +30,8 @@ def main():
         print(f"SbieDll      : {api.home}")
         print(f"Driver       : {api.version()}")
         print(f"Home path    : {api.home_path()}")
+        sandman = os.path.join(api.home, "SandMan.exe")
+        print(f"SandMan.exe  : {'found' if os.path.isfile(sandman) else 'MISSING'} ({sandman})")
         boxes = api.enum_boxes()
         print(f"Sandboxes    : {len(boxes)} -> {boxes}")
         for box in boxes:

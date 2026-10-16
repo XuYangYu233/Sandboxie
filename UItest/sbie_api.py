@@ -1,4 +1,4 @@
-"""Minimal ctypes bridge to Sandboxie's SbieDll.dll (UItest test harness).
+"""Minimal ctypes bridge to Sandboxie's SbieDll.dll (UItest Manager).
 
 This module loads the SbieDll.dll that ships with an installed Sandboxie /
 Sandboxie-Plus build and wraps the stable exported API subset used by this
@@ -23,11 +23,8 @@ IMAGE_NAME_LEN = 96         # WCHAR[96], see sbieapi.h
 SID_LEN = 96                # WCHAR[96], see sbieapi.h
 MAX_PIDS = 512              # API_MAX_PIDS, see Sandboxie/core/drv/api_defs.h
 CURRENT_SESSION = 0xFFFFFFFF
-MESSAGE_BUFFER_LEN = 4096   # characters, for SbieApi_GetMessage
 
 STATUS_SUCCESS = 0
-STATUS_ACCESS_DENIED = 0xC0000022
-STATUS_DEVICE_ALREADY_ATTACHED = 0xC0000038
 
 
 class STARTUPINFO(ctypes.Structure):
@@ -126,7 +123,6 @@ class SbieAPI:
         self._dll = dll
         self.home = home
         self.session_id = _current_session_id()
-        self.last_message_num = 0
         self._bind()
 
     @classmethod
@@ -142,8 +138,6 @@ class SbieAPI:
         # pointers from being truncated to int.
         k32 = ctypes.windll.kernel32
         k32.CloseHandle.argtypes = [ctypes.c_void_p]
-        k32.LocalFree.argtypes = [ctypes.c_void_p]
-        k32.LocalFree.restype = ctypes.c_void_p
 
         d.SbieApi_GetVersion.argtypes = [ctypes.c_wchar_p]
         d.SbieApi_GetVersion.restype = ctypes.c_long
@@ -180,16 +174,6 @@ class SbieAPI:
         d.SbieApi_SessionLeader.argtypes = [ctypes.c_ulong,
                                             ctypes.POINTER(ctypes.c_void_p)]
         d.SbieApi_SessionLeader.restype = ctypes.c_long
-
-        d.SbieApi_GetMessage.argtypes = [ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong,
-                                         ctypes.POINTER(ctypes.c_ulong),
-                                         ctypes.POINTER(ctypes.c_ulong),
-                                         ctypes.c_wchar_p, ctypes.c_ulong]
-        d.SbieApi_GetMessage.restype = ctypes.c_ulong
-
-        d.SbieDll_FormatMessage.argtypes = [ctypes.c_ulong,
-                                            ctypes.POINTER(ctypes.c_wchar_p)]
-        d.SbieDll_FormatMessage.restype = ctypes.c_void_p
 
     # -- queries ---------------------------------------------------------
 
@@ -249,116 +233,19 @@ class SbieAPI:
         return {"pid": pid, "box": box.value, "image": image.value,
                 "session": session.value}
 
-    # -- session leader and driver messages ------------------------------
+    # -- session information ----------------------------------------------
 
-    def session_leader_pid(self):
-        """Return the pid of the session UI, or 0 if none is registered."""
+    def session_leader(self):
+        """Return the pid of the current session UI, or None.
+
+        Query direction only (no signature check): reports which official
+        UI owns the session-leader role, normally SandMan.
+        """
         pid = ctypes.c_void_p(0)
         rc = self._dll.SbieApi_SessionLeader(self.session_id, ctypes.byref(pid))
         if rc != STATUS_SUCCESS:
             raise SbieError("SbieApi_SessionLeader", rc)
-        return pid.value or 0
-
-    def take_over(self):
-        """Try to become the session UI (session leader).
-
-        The driver only accepts this from a process it trusts (one with a
-        matching .sig file, or any process while Windows test-signing is
-        enabled), so in practice it succeeds only on a development machine.
-        Returns True on success, False if another agent already manages the
-        session; raises SbieError otherwise (e.g. STATUS_INVALID_SIGNATURE).
-        """
-        rc = self._dll.SbieApi_SessionLeader(0, None)
-        if rc == STATUS_SUCCESS:
-            return True
-        if (rc & 0xFFFFFFFF) == STATUS_DEVICE_ALREADY_ATTACHED:
-            return False
-        raise SbieError("SbieApi_SessionLeader", rc)
-
-    def log_file_path(self):
-        """Return the service message log path, or None.
-
-        The service writes every SBIE message to this file when the admin
-        sets HKLM\...\Services\SbieSvc -> LogFile to "<level>;<path>" (a
-        documented Sandboxie setting, see "Messages From Sandboxie" in the
-        official documentation).  Reading a plain file needs no signature,
-        so this is the way for an unsigned UI to see driver messages.
-        """
-        try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                r"SYSTEM\CurrentControlSet\Services\SbieSvc") as key:
-                value, _ = winreg.QueryValueEx(key, "LogFile")
-        except OSError:
-            return None
-        if not isinstance(value, str) or ";" not in value:
-            return None
-        path = value.split(";", 1)[1].strip()
-        return path or None
-
-    def get_messages(self):
-        """Return new SBIE driver messages for this session.
-
-        The driver allows this only for the session leader (or the service);
-        other callers get STATUS_ACCESS_DENIED.
-        """
-        messages = []
-        num = ctypes.c_ulong(self.last_message_num)
-        for _ in range(256):
-            msgid = ctypes.c_ulong(0)
-            pid = ctypes.c_ulong(0)
-            buf = ctypes.create_unicode_buffer(MESSAGE_BUFFER_LEN)
-            rc = self._dll.SbieApi_GetMessage(ctypes.byref(num), self.session_id,
-                                              ctypes.byref(msgid), ctypes.byref(pid),
-                                              buf, MESSAGE_BUFFER_LEN * 2)
-            if (rc & 0xFFFFFFFF) == STATUS_ACCESS_DENIED:
-                raise SbieError("SbieApi_GetMessage", rc)   # not the session leader
-            if rc != STATUS_SUCCESS:    # 0 = entry read, anything else = no more entries
-                break
-            self.last_message_num = num.value
-
-            strings, chunk = [], []
-            for ch in buf:              # buffer holds NUL-separated strings
-                if ch == "\0":
-                    if not chunk:
-                        break
-                    strings.append("".join(chunk))
-                    chunk = []
-                else:
-                    chunk.append(ch)
-            # modern builds key the message table by the full code (severity
-            # and facility bits included, e.g. 0x810208B0 for SBIE2224), so
-            # keep both the full code and the plain message number
-            messages.append({"code": msgid.value, "id": msgid.value & 0xFFFF,
-                             "pid": pid.value, "strings": strings})
-        return messages
-
-    def _format_once(self, code, ins):
-        ptr = self._dll.SbieDll_FormatMessage(code, ins)
-        if not ptr:
-            return None
-        try:
-            return ctypes.wstring_at(ptr)
-        finally:
-            ctypes.windll.kernel32.LocalFree(ptr)
-
-    def format_message(self, code, strings):
-        """Format an SBIE message code with its substitution strings.
-
-        `code` is the full code as stored in the driver log (severity and
-        facility bits included); if that is not found, retry with the plain
-        message number, which older drivers used.
-        """
-        ins = (ctypes.c_wchar_p * (len(strings) + 2))()
-        for i, text in enumerate(strings, start=1):     # ins[1] holds %2's value
-            ins[i] = text
-
-        message = self._format_once(code, ins)
-        if not message or message.startswith("err="):
-            fallback = self._format_once(code & 0xFFFF, ins)
-            if fallback and not fallback.startswith("err="):
-                return fallback
-        return message or f"SBIE{code & 0xFFFF}"
+        return pid.value or None
 
     # -- actions ---------------------------------------------------------
 
