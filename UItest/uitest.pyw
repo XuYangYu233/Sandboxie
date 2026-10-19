@@ -404,13 +404,13 @@ class UItestApp:
         win = tk.Toplevel(self.root)
         win.title(f"编辑配置：{box}")
         win.geometry("700x620")
+        win.minsize(640, 360)
         win.transient(self.root)
 
         outer = ttk.Frame(win, padding=6)
         outer.pack(fill=tk.BOTH, expand=True)
 
         notebook = ttk.Notebook(outer)
-        notebook.pack(fill=tk.BOTH, expand=True)
 
         # ---------------------------------------------------------------
         # 选项页：常用布尔开关，三态勾选框
@@ -637,7 +637,8 @@ class UItestApp:
                   foreground="#888888").pack(side=tk.RIGHT)
 
         bar = ttk.Frame(outer)
-        bar.pack(fill=tk.X, pady=(6, 0))
+        bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+        notebook.pack(fill=tk.BOTH, expand=True)
         ttk.Button(bar, text="保存", command=save).pack(side=tk.RIGHT)
         ttk.Button(bar, text="取消", command=on_close).pack(
             side=tk.RIGHT, padx=(6, 0))
