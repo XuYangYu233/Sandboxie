@@ -594,6 +594,38 @@ class UItestApp:
             win.destroy()
             self.refresh()
 
+        def has_changes():
+            """True when any option toggle or manual-table row was changed."""
+            for var, setting, initial in check_items:
+                if var.get() != initial:
+                    return True
+            entries = [tuple(tree.item(item, "values")) for item in tree.get_children()]
+            entries = [entry for entry in entries if (entry[0] or "").strip()]
+            loaded = []
+            for setting, values in section.items():
+                for value in values:
+                    loaded.append((setting, value))
+            return sorted(entries) != sorted(loaded)
+
+        def on_close():
+            """Ask before closing when there are unsaved changes."""
+            if not has_changes():
+                win.destroy()
+                return
+            ret = messagebox.askyesnocancel(
+                "未保存的修改",
+                "配置有未保存的修改。\n\n"
+                "是否保存？\n（是=保存并关闭　否=不保存直接关闭　取消=继续编辑）",
+                parent=win)
+            if ret is None:
+                return
+            if ret:
+                save()
+            else:
+                win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
         load_rows()
 
         mbar = ttk.Frame(manual)
@@ -607,7 +639,7 @@ class UItestApp:
         bar = ttk.Frame(outer)
         bar.pack(fill=tk.X, pady=(6, 0))
         ttk.Button(bar, text="保存", command=save).pack(side=tk.RIGHT)
-        ttk.Button(bar, text="取消", command=win.destroy).pack(
+        ttk.Button(bar, text="取消", command=on_close).pack(
             side=tk.RIGHT, padx=(6, 0))
 
 
