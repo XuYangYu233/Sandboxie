@@ -79,6 +79,175 @@ CFG_OPTION_CATEGORIES = [
 ]
 
 
+# 路径/规则类多值配置（设置名 -> 中文标签），取自 Sandman 的 Access / Network 页。
+PATH_OPTION_GROUPS = [
+    ("文件访问", [
+        ("OpenFilePath", "允许打开的文件/程序"),
+        ("OpenPipePath", "允许的命名管道"),
+        ("ClosedFilePath", "阻止访问的文件/程序"),
+        ("ReadFilePath", "允许只读访问"),
+        ("WriteFilePath", "允许写入"),
+        ("OpenKeyPath", "允许访问的注册表键"),
+        ("ClosedKeyPath", "阻止访问的注册表键"),
+        ("OpenIpcPath", "允许访问的 IPC 对象"),
+        ("ClosedIpcPath", "阻止访问的 IPC 对象"),
+        ("OpenWinClass", "允许访问的窗口类"),
+    ]),
+    ("网络管控", [
+        ("NetworkAccess", "网络访问规则"),
+        ("NetworkDnsFilter", "DNS 过滤（域名）"),
+        ("NetworkUseProxy", "使用代理的程序"),
+        ("BindAdapter", "仅允许绑定网卡"),
+        ("BindAdapterIP", "仅允许绑定 IP"),
+    ]),
+]
+
+
+class ListRulePage:
+    """单页多值规则编辑器：选择规则类型，编辑其值列表。
+
+    交互对齐 SandMan 的 Access/Network 页：先用下拉框选规则类型，
+    再对下方的值列表进行添加行、删除行、双击就地编辑。
+    """
+
+    def __init__(self, master, options, section):
+        self.options = options                      # [(setting, label), ...]
+        self.initial = {s: list(section.get(s) or []) for s, _ in options}
+        self.cache = {s: list(v) for s, v in self.initial.items()}
+        self.current = 0
+
+        self.page = ttk.Frame(master, padding=8)
+        self.page._sbie_rule = self
+
+        top = ttk.Frame(self.page)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="规则类型：").pack(side=tk.LEFT)
+        self.combo = ttk.Combobox(top, state="readonly",
+                                  values=[label for _, label in options],
+                                  width=34)
+        self.combo.pack(side=tk.LEFT, padx=(4, 0))
+        self.combo.current(0)
+        self.combo.bind("<<ComboboxSelected>>",
+                        lambda _e: self.show(self.combo.current()))
+
+        self.tree = ttk.Treeview(self.page, columns=("value",), show="headings",
+                                 selectmode="extended")
+        self.tree.heading("value", text="值")
+        self.tree.column("value", width=560, anchor=tk.W)
+        self.tree.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.tree.bind("<Double-1>", self._on_dbl_click)
+
+        bar = ttk.Frame(self.page)
+        bar.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(bar, text="添加行", command=self.add_row).pack(side=tk.LEFT)
+        ttk.Button(bar, text="删除选中行", command=self.delete_rows).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+        self._fill(0)
+
+    # -- data -----------------------------------------------------------
+
+    def setting(self):
+        return self.options[self.current][0]
+
+    def _sync(self):
+        """Write the visible rows back to the cache of the current type."""
+        setting = self.setting()
+        self.cache[setting] = [self.tree.item(i, "values")[0]
+                               for i in self.tree.get_children()]
+
+    def values(self):
+        """Synced {setting: [non-empty values]} of every rule type."""
+        self._sync()
+        return {s: [v for v in vals if (v or "").strip()]
+                for s, vals in self.cache.items()}
+
+    def show(self, idx):
+        """Switch rule type: save the current rows, then load the target."""
+        self._sync()
+        self._fill(idx)
+
+    def _fill(self, idx):
+        """Show the cached values of the given rule type."""
+        self.current = idx
+        setting = self.setting()
+        self.tree.delete(*self.tree.get_children())
+        for value in self.cache.get(setting, []):
+            self.tree.insert("", tk.END, values=(value,))
+
+    def apply(self, api, box):
+        """Diff-save every rule type to the sandbox config."""
+        for setting, new_values in self.values().items():
+            old_values = self.initial.get(setting) or []
+            if new_values == old_values:
+                continue
+            if not new_values:
+                api.set_setting(box, setting, "", mode="set")
+                continue
+            api.set_setting(box, setting, new_values[0], mode="set")
+            for value in new_values[1:]:
+                api.set_setting(box, setting, value, mode="append")
+
+    def reset(self, section):
+        """Reload state from a fresh section (used after a failed save)."""
+        self.initial = {s: list(section.get(s) or []) for s, _ in self.options}
+        self.cache = {s: list(v) for s, v in self.initial.items()}
+        self._fill(self.current)
+
+    # -- row editing ----------------------------------------------------
+
+    def _on_dbl_click(self, event):
+        item = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if item and column == "#1":
+            self._edit_item(item)
+
+    def _edit_item(self, item):
+        values = list(self.tree.item(item, "values"))
+        if not values:
+            return
+        self.tree.see(item)
+        self.tree.update_idletasks()
+        box = self.tree.bbox(item, "#1")
+        if box is None:
+            return
+        entry = tk.Entry(self.tree)
+        entry.place(x=box[0], y=box[1], width=box[2], height=box[3])
+        entry.insert(0, values[0])
+        entry.focus_force()
+        entry.selection_range(0, tk.END)
+        state = {"done": False}
+
+        def commit(_event=None):
+            if state["done"]:
+                return
+            state["done"] = True
+            values[0] = entry.get()
+            self.tree.item(item, values=values)
+            entry.destroy()
+
+        def cancel(_event=None):
+            if state["done"]:
+                return
+            state["done"] = True
+            entry.destroy()
+
+        entry.bind("<Return>", commit)
+        entry.bind("<FocusOut>", commit)
+        entry.bind("<Escape>", cancel)
+
+    def add_row(self):
+        item = self.tree.insert("", tk.END, values=("",))
+        self.tree.selection_set(item)
+        self.tree.see(item)
+        self._edit_item(item)
+
+    def delete_rows(self):
+        for item in self.tree.selection():
+            self.tree.delete(item)
+
+
+
 class UItestApp:
     """Two lists: sandboxes on the left, their processes on the right."""
 
@@ -478,11 +647,19 @@ class UItestApp:
         # 手动编辑页：设置名/值 表格（可双击编辑、添加/删除行）
         # ---------------------------------------------------------------
 
+        # 规则列表页（文件访问 / 网络管控）
+        rule_pages = []
+        for group_title, options in PATH_OPTION_GROUPS:
+            rule_page = ListRulePage(notebook, options, section)
+            rule_pages.append(rule_page)
+            notebook.add(rule_page.page, text=group_title)
+
         manual = ttk.Frame(notebook, padding=8)
         notebook.add(manual, text="手动编辑")
 
         tree = ttk.Treeview(manual, columns=("setting", "value"), show="headings",
                             selectmode="extended")
+        tree._sbie_manual = True
         tree.heading("setting", text="设置名")
         tree.column("setting", width=200, anchor=tk.W)
         tree.heading("value", text="值")
@@ -557,6 +734,8 @@ class UItestApp:
             except SbieError:
                 section = {}
             load_rows()
+            for rule_page in rule_pages:
+                rule_page.reset(section)
             for item in check_items:
                 state = bool_state(item[1])
                 item[0].set(state)
@@ -567,7 +746,8 @@ class UItestApp:
                 # 1) 先应用手动表格的增删改
                 entries = [tree.item(item, "values") for item in tree.get_children()]
                 entries = [entry for entry in entries if (entry[0] or "").strip()]
-                self.api.update_section(box, entries)
+                self.api.update_section(box, entries,
+                             base={s: list(v) for s, v in section.items()})
                 # 2) 再应用选项页差异（同一设置两处都改时，选项页优先）
                 for item in check_items:
                     var, setting, initial = item
@@ -582,6 +762,10 @@ class UItestApp:
                         self.api.set_setting(box, setting, "n")
                     else:
                         self.api.set_setting(box, setting, "")
+                # 3) 应用规则列表页（文件访问 / 网络管控）的差异
+                for rule_page in rule_pages:
+                    rule_page.apply(self.api, box)
+                # 4) 兜底：沙箱不能丢失 Enabled，否则会从系统中消失
                 # 3) 兜底：沙箱不能丢失 Enabled，否则会从系统中消失
                 after = self.api.get_section(box)
                 if "Enabled" not in after:
@@ -605,7 +789,12 @@ class UItestApp:
             for setting, values in section.items():
                 for value in values:
                     loaded.append((setting, value))
-            return sorted(entries) != sorted(loaded)
+            if sorted(entries) != sorted(loaded):
+                return True
+            for rule_page in rule_pages:
+                if rule_page.values() != rule_page.initial:
+                    return True
+            return False
 
         def on_close():
             """Ask before closing when there are unsaved changes."""

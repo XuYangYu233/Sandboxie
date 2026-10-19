@@ -450,7 +450,7 @@ class SbieAPI:
         shutil.rmtree(root)
         return True
 
-    def update_section(self, section, entries):
+    def update_section(self, section, entries, base=None):
         """Apply `entries` (list of (setting, value)) to `section` as a diff.
 
         Only touched settings are written.  A row with an empty value removes
@@ -467,7 +467,8 @@ class SbieAPI:
                 removed.add(setting)
             else:
                 new.setdefault(setting, []).append(value)
-        old = self.get_section(section)
+        old = base if base is not None else self.get_section(section)
+        old = {k: list(v) for k, v in old.items()}  # plain baseline copy
         for setting, old_values in old.items():
             if setting in removed or setting not in new:
                 if old_values:
